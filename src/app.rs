@@ -183,6 +183,7 @@ pub enum View {
     Folder,
     Trash,
     Settings,
+    DataTable,
 }
 
 /// A confirmation dialog and the pages it is about.
@@ -267,6 +268,8 @@ pub struct Workspace {
     /// The open confirmation dialog.
     pub confirm: Option<Confirm>,
     pub view: View,
+    /// The open 数据表 (data table) page, if any.
+    pub datatable: Option<crate::datatable_view::DataTableView>,
     pub home: crate::home::Home,
     pub settings_scroll: ScrollHandle,
     /// 回收站 rows, refreshed when the page opens or changes.
@@ -440,6 +443,7 @@ impl Workspace {
             batch: None,
             confirm: None,
             view: View::Doc,
+            datatable: None,
             home: Default::default(),
             settings_scroll: ScrollHandle::new(),
             trash: vec![],
@@ -1346,6 +1350,7 @@ impl Render for Workspace {
             View::Folder => self.render_folder(window, cx),
             View::Trash => self.render_trash(cx),
             View::Settings => self.render_settings(cx),
+            View::DataTable => self.render_datatable(window, cx),
         };
         let move_dlg = self.render_move_dialog(cx);
         let export_md = self.render_export_md(cx);

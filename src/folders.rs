@@ -122,6 +122,7 @@ impl Workspace {
                 .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.create_menu = None; cx.notify(); }))
                 .child(row("create-document", "doc", tr("文档", "Document")).on_click(cx.listener(move |w, _, window, cx| w.create_doc(false, doc_parent.clone(), window, cx))))
                 .child(row("create-markdown", "doc-md", "Markdown").on_click(cx.listener(move |w, _, window, cx| w.create_doc(true, md_parent.clone(), window, cx))))
+                .child(row("create-datatable", "storage", tr("数据表", "Data table")).on_click(cx.listener(move |w, _, window, cx| { w.create_menu = None; w.open_datatable(window, cx); })))
                 .child(row("create-folder", "folder", tr("文件夹", "Folder")).on_click(cx.listener(move |w, _, window, cx| w.new_folder(folder_parent.clone(), window, cx))))
         )).with_priority(3).into_any_element())
     }

@@ -21,6 +21,7 @@ mod devtools {
     pub fn take_pick() -> Option<Vec<std::path::PathBuf>> { None }
     pub fn file_drag() -> bool { false }
 }
+mod datatable_view;
 mod docinfo;
 mod docmenu;
 mod editor;
@@ -59,7 +60,7 @@ mod tree;
 mod ui;
 mod update;
 
-use fdl_core::{docxml, lang, markdown, model, palette, paste, store, time};
+use fdl_core::{datatable, docxml, lang, markdown, model, palette, paste, store, time};
 
 use gpui::*;
 

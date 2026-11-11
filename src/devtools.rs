@@ -230,6 +230,13 @@ pub fn start(window: &mut Window, cx: &mut App) {
                 }).unwrap();
                 continue;
             }
+            if cmd == "datatable" {
+                cx.update(|cx| {
+                    let handle = cx.windows().into_iter().find_map(|w| w.downcast::<crate::app::Workspace>()).unwrap();
+                    handle.update(cx, |ws, window, cx| ws.open_datatable(window, cx)).unwrap();
+                }).unwrap();
+                continue;
+            }
             // `filedrag x y a|b`, `filedrop x y`, `fileleave`: files dragged in from the Finder.
             if matches!(cmd, "filedrag" | "filedrop" | "fileleave") {
                 let mut it = rest.trim().splitn(3, ' ');
