@@ -94,6 +94,8 @@ pub struct DataTableView {
     pub date_menu: Option<(usize, usize, Point<Pixels>, i64, u32)>,
     /// Column drag-resize in progress: (field id, mouse-down x, start width).
     pub col_drag: Option<(String, f32, f32)>,
+    /// Selected record indices (gutter checkboxes).
+    pub row_sel: std::collections::HashSet<usize>,
     /// Shared horizontal scroll so the header and body stay aligned.
     pub hscroll: ScrollHandle,
     /// Vertical scroll for the body rows.
@@ -149,6 +151,7 @@ impl Workspace {
             field_menu: None,
             date_menu: None,
             col_drag: None,
+            row_sel: Default::default(),
             hscroll: ScrollHandle::new(),
             vscroll: ScrollHandle::new(),
         });
@@ -270,6 +273,32 @@ impl Workspace {
     fn add_record(&mut self, cx: &mut Context<Self>) {
         if let Some(dt) = self.datatable.as_mut() {
             dt.table.add_record();
+            cx.notify();
+        }
+    }
+
+    fn toggle_row(&mut self, ri: usize, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            if !dt.row_sel.remove(&ri) { dt.row_sel.insert(ri); }
+            cx.notify();
+        }
+    }
+
+    /// Header checkbox: select all rows, or clear when all are already selected.
+    fn toggle_all_rows(&mut self, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            let n = dt.table.records.len();
+            if dt.row_sel.len() == n { dt.row_sel.clear(); } else { dt.row_sel = (0..n).collect(); }
+            cx.notify();
+        }
+    }
+
+    fn delete_selected_rows(&mut self, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            let ids: Vec<String> = dt.row_sel.iter().filter_map(|&i| dt.table.records.get(i)).map(|r| r.id.clone()).collect();
+            for id in ids { dt.table.remove_record(&id); }
+            dt.row_sel.clear();
+            dt.sel = None;
             cx.notify();
         }
     }
@@ -478,7 +507,35 @@ impl Workspace {
                 cx.notify();
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(move |w, _, _, cx| end(w, cx)));
+        if let Some(bar) = self.dt_selection_bar(cx) {
+            page = page.child(bar);
+        }
         page.into_any_element()
+    }
+
+    /// Floating action bar shown while rows are selected (Feishu's 已选 N 条).
+    fn dt_selection_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let n = self.datatable.as_ref().map(|dt| dt.row_sel.len()).unwrap_or(0);
+        if n == 0 { return None; }
+        let btn = |id: &'static str, glyph: &'static str, label: &'static str, danger: bool| {
+            div().id(id).flex().items_center().gap(px(5.)).h(px(30.)).px(px(10.)).rounded(px(6.)).cursor_pointer()
+                .hover(|s| s.bg(Theme::fill_hover()))
+                .child(icon(glyph, 15., if danger { Theme::danger() } else { Theme::icon() }))
+                .child(div().text_size(px(13.)).text_color(if danger { Theme::danger() } else { Theme::text() }).child(label))
+        };
+        Some(deferred(
+            div().absolute().bottom(px(28.)).left_0().right_0().flex().justify_center()
+                .child(
+                    popover().id("dt-selbar").flex().items_center().gap(px(4.)).h(px(44.)).px(px(10.))
+                        .child(div().text_size(px(13.)).text_color(Theme::text_caption()).mr(px(4.))
+                            .child(format!("已选 {n} 条")))
+                        .child(btn("dt-sel-del", "bin", "删除", true)
+                            .on_click(cx.listener(|w, _, _, cx| w.delete_selected_rows(cx))))
+                        .child(dt_divider())
+                        .child(btn("dt-sel-cancel", "x", "取消", false)
+                            .on_click(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.row_sel.clear(); } cx.notify(); }))),
+                ),
+        ).with_priority(7).into_any_element())
     }
 
     /// Feishu's base rail: 搜索, then 数据表 / 仪表盘 / 工作流, 新建 at the foot.
@@ -609,14 +666,17 @@ impl Workspace {
         let input = dt.input.clone();
         let hscroll = dt.hscroll.clone();
         let vscroll = dt.vscroll.clone();
+        let row_sel = dt.row_sel.clone();
+        let all_sel = !records.is_empty() && row_sel.len() == records.len();
 
         // header row (white, like Feishu; only the gridlines separate it)
         let mut header = div().flex_none().flex().h(px(HEADER_H)).bg(Theme::bg_body())
             .border_b_1().border_color(Theme::table_line())
             .child(
-                div().flex_none().w(px(GUTTER_W)).h_full().flex().items_center().justify_center()
-                    .border_r_1().border_color(Theme::table_line())
-                    .child(checkbox_box(false)),
+                div().id("dt-hdr-check").flex_none().w(px(GUTTER_W)).h_full().flex().items_center().justify_center()
+                    .border_r_1().border_color(Theme::table_line()).cursor_pointer()
+                    .child(checkbox_box(all_sel))
+                    .on_click(cx.listener(|w, _, _, cx| w.toggle_all_rows(cx))),
             );
         for (fi, f) in fields.iter().enumerate() {
             let (fid, fw) = (f.id.clone(), f.width);
@@ -668,16 +728,21 @@ impl Workspace {
         // outer wrapper so the header moves in lock-step.
         let mut body = div().id("dt-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&vscroll).flex().flex_col();
         for (ri, rec) in records.iter().enumerate() {
-            let mut row = div().group("dt-row").flex_none().flex().h(px(row_h)).hover(|s| s.bg(Theme::block_bg_area()))
+            let checked = row_sel.contains(&ri);
+            let mut row = div().group("dt-row").flex_none().flex().h(px(row_h))
+                .when(checked, |d| d.bg(Theme::fill_active()))
+                .when(!checked, |d| d.hover(|s| s.bg(Theme::block_bg_area())))
                 .border_b_1().border_color(Theme::table_line())
                 .child(
-                    // gutter: the row number, which becomes a checkbox on hover (Feishu)
-                    div().relative().flex_none().w(px(GUTTER_W)).h_full().flex().items_center().justify_center()
-                        .border_r_1().border_color(Theme::table_line())
-                        .child(div().group_hover("dt-row", |s| s.invisible())
+                    // gutter: the row number, which becomes a checkbox on hover or
+                    // while the row is selected (Feishu)
+                    div().id(("dt-gutter", ri)).relative().flex_none().w(px(GUTTER_W)).h_full().flex().items_center().justify_center()
+                        .border_r_1().border_color(Theme::table_line()).cursor_pointer()
+                        .child(div().when(checked, |d| d.invisible()).group_hover("dt-row", |s| s.invisible())
                             .text_size(px(12.)).text_color(Theme::text_placeholder())
                             .child(format!("{}", ri + 1)))
-                        .child(div().absolute().invisible().group_hover("dt-row", |s| s.visible()).child(checkbox_box(false))),
+                        .child(div().absolute().when(!checked, |d| d.invisible().group_hover("dt-row", |s| s.visible())).child(checkbox_box(checked)))
+                        .on_click(cx.listener(move |w, _, _, cx| w.toggle_row(ri, cx))),
                 );
             for (ci, f) in fields.iter().enumerate() {
                 let on = sel == Some((ri, ci));
