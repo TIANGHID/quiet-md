@@ -183,6 +183,27 @@ pub enum View {
     Folder,
     Trash,
     Settings,
+    /// 版本历史: a read-only preview of a past version with the version drawer.
+    History,
+}
+
+/// One row of the 版本历史 drawer: a stored version, or the current one
+/// (`path` is `None`, read live from disk).
+pub struct HistRow {
+    pub at_ms: u64,
+    pub path: Option<std::path::PathBuf>,
+}
+
+/// The open 版本历史 page: the document, its versions (newest first), the
+/// selected row, and a read-only editor rendering that version in the centre.
+pub struct HistoryView {
+    pub id: String,
+    pub title: String,
+    pub rows: Vec<HistRow>,
+    pub selected: usize,
+    pub preview: Entity<Editor>,
+    pub width: crate::store::PageWidth,
+    pub markdown: bool,
 }
 
 /// A confirmation dialog and the pages it is about.
@@ -267,6 +288,8 @@ pub struct Workspace {
     /// The open confirmation dialog.
     pub confirm: Option<Confirm>,
     pub view: View,
+    /// The open 版本历史 page (center preview + version drawer), if any.
+    pub history: Option<HistoryView>,
     pub home: crate::home::Home,
     pub settings_scroll: ScrollHandle,
     /// 回收站 rows, refreshed when the page opens or changes.
@@ -440,6 +463,7 @@ impl Workspace {
             batch: None,
             confirm: None,
             view: View::Doc,
+            history: None,
             home: Default::default(),
             settings_scroll: ScrollHandle::new(),
             trash: vec![],
@@ -1346,6 +1370,7 @@ impl Render for Workspace {
             View::Folder => self.render_folder(window, cx),
             View::Trash => self.render_trash(cx),
             View::Settings => self.render_settings(cx),
+            View::History => self.render_history(cx),
         };
         let move_dlg = self.render_move_dialog(cx);
         let export_md = self.render_export_md(cx);
@@ -1423,6 +1448,12 @@ impl Render for Workspace {
                 // Esc leaves 设置 (unless its filter field has the caret).
                 if ev.keystroke.key == "escape" && w.view == View::Settings && !w.settings_filter.read(cx).is_focused(window) {
                     w.close_settings(cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                // Esc leaves 版本历史.
+                if ev.keystroke.key == "escape" && w.view == View::History {
+                    w.close_history(cx);
                     cx.stop_propagation();
                     return;
                 }

@@ -23,6 +23,7 @@ mod devtools {
 }
 mod docinfo;
 mod docmenu;
+mod history_view;
 mod editor;
 mod highlight;
 mod home;
@@ -59,7 +60,7 @@ mod tree;
 mod ui;
 mod update;
 
-use fdl_core::{docxml, lang, markdown, model, palette, paste, store, time};
+use fdl_core::{docxml, history, lang, markdown, model, palette, paste, store, time};
 
 use gpui::*;
 

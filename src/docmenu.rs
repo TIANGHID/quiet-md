@@ -12,8 +12,6 @@ use gpui::{prelude::FluentBuilder, *};
 pub enum DocSub {
     Width,
     Download,
-    /// 更多: 显示引用列表.
-    More,
 }
 
 const MENU_W: f32 = 200.;
@@ -135,6 +133,7 @@ impl Workspace {
         let starred = entry.is_some_and(|e| e.meta.starred > 0);
         let width = entry.map(|e| e.meta.width).unwrap_or_default();
         let refs_shown = !entry.is_some_and(|e| e.meta.refs_hidden);
+        let hist_id = id.clone();
         let sub = self.doc_sub;
         let hover_sub = |s: Option<DocSub>| {
             cx.listener(move |w: &mut Workspace, hovered: &bool, _, cx| {
@@ -219,8 +218,23 @@ impl Workspace {
                     .on_click(cx.listener(|w, _, window, cx| w.open_doc_info(window, cx))),
             )
             .child(divider())
-            // 更多 and 删除 share the last group.
-            .child(menu_item("dm-more", "ellipsis", crate::settings::text("更多"), true, sub == Some(DocSub::More)).on_hover(hover_sub(Some(DocSub::More))))
+            .child(
+                menu_item("dm-refs", "quote", crate::settings::text("显示引用列表"), false, false)
+                    .child(
+                        div().flex_none().mr(px(2.)).w(px(28.)).h(px(16.)).rounded_full().p(px(2.)).flex()
+                            .when(refs_shown, |d| d.justify_end())
+                            .bg(if refs_shown { Theme::primary_500() } else { Theme::block_placeholder() })
+                            .child(div().size(px(12.)).rounded_full().bg(crate::theme::raised(Theme::bg_body()))),
+                    )
+                    .on_hover(hover_sub(None))
+                    .on_click(cx.listener(move |w, _, _, cx| { w.close_doc_menu(cx); w.ask_refs(!refs_shown, cx); })),
+            )
+            .child(
+                menu_item("dm-history", "restore", crate::settings::text("版本历史"), false, false)
+                    .on_hover(hover_sub(None))
+                    .on_click(cx.listener(move |w, _, window, cx| { w.close_doc_menu(cx); w.open_history(&hist_id, window, cx); })),
+            )
+            .child(divider())
             .child(
                 menu_item("dm-delete", "bin", crate::settings::text("删除"), false, false)
                     .on_hover(hover_sub(None))
@@ -272,37 +286,6 @@ impl Workspace {
                         .child(sub_item("dm-md", "Markdown").on_click(cx.listener(move |w, _, _, cx| w.open_export_md(&id, cx))))
                         .into_any_element()
                 },
-            )),
-            Some(DocSub::More) => Some((
-                if crate::printing::SUPPORTED { item_top(9, 6) } else { item_top(8, 5) } - 1. - PAD,
-                popover()
-                    .id("dm-more-menu")
-                    .occlude()
-                    .w(px(210.))
-                    .px(px(5.))
-                    .py(px(PAD))
-                    .child(recorder())
-                    .child(
-                        sub_item("dm-refs", crate::settings::text("显示引用列表"))
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .w(px(28.))
-                                    .h(px(16.))
-                                    .rounded_full()
-                                    .p(px(2.))
-                                    .flex()
-                                    .when(refs_shown, |d| d.justify_end())
-                                    .bg(if refs_shown { Theme::primary_500() } else { Theme::block_placeholder() })
-                                    .child(div().size(px(12.)).rounded_full().bg(crate::theme::raised(Theme::bg_body()))),
-                            )
-                            .on_click(cx.listener(move |w, _, _, cx| {
-                                w.close_doc_menu(cx);
-                                w.ask_refs(!refs_shown, cx);
-                            })),
-                    )
-                    .into_any_element(),
             )),
             None => None,
         };

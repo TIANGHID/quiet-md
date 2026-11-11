@@ -421,6 +421,42 @@ impl Store {
             .join("quiet-md/recovery").join(format!("{:016x}", hash.finish()))
     }
 
+    /// This library's version-history store, outside the library (so a lost or
+    /// rolled-back vault keeps its past), keyed like `recovery_dir`.
+    fn history(&self) -> crate::history::History {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.root.hash(&mut hash);
+        let root = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir)
+            .join("quiet-md/history").join(format!("{:016x}", hash.finish()));
+        crate::history::History::new(root)
+    }
+
+    /// 版本历史 of `id`, newest first.
+    pub fn snapshots(&self, id: &str) -> Vec<crate::history::Snapshot> { self.history().list(id) }
+
+    /// A stored version as a document, for previewing without rolling back.
+    pub fn snapshot_doc(&self, id: &str, path: &std::path::Path) -> Result<Document> {
+        self.parse_doc(id, &crate::history::read(path)?)
+    }
+
+    /// Roll `id` back to the snapshot at `path`: its content becomes the current
+    /// version through a normal save, so the pre-restore state is itself kept in
+    /// history. Returns the restored document for the open editor to reload.
+    pub fn restore_snapshot(&mut self, id: &str, path: &std::path::Path) -> Result<Document> {
+        let doc = self.parse_doc(id, &crate::history::read(path)?)?;
+        self.save(id, &doc)?;
+        Ok(doc)
+    }
+
+    /// Force a version-history checkpoint of `id`'s current disk content (the
+    /// manual 提交 button). Returns whether one was written.
+    pub fn checkpoint(&self, id: &str) -> Result<bool> {
+        let bytes = std::fs::read(self.path(id))?;
+        let ext = if self.is_markdown(id) { "md" } else { "xml" };
+        Ok(self.history().snapshot(id, ext, &bytes, true)?)
+    }
+
     pub fn recover_later(&self, doc: &Document) -> Result<()> {
         let dir = self.recovery_dir();
         std::fs::create_dir_all(&dir)?;
@@ -618,6 +654,10 @@ impl Store {
                 }
             }
             write_atomic(&self.path(id), xml.as_bytes())?;
+            // Version history: a throttled copy of what we just wrote, outside
+            // the library. Best-effort — never fail a save over it.
+            let ext = if self.is_markdown(id) { "md" } else { "xml" };
+            let _ = self.history().snapshot(id, ext, xml.as_bytes(), false);
         }
         self.loaded.borrow_mut().insert(id.to_string(), if same { disk.unwrap_or(xml) } else { xml });
         if let Some(title) = title.filter(|t| *t != self.markdown_title(id)) { self.retitle_markdown(id, &title)?; }
@@ -828,8 +868,8 @@ impl Store {
         let expired: Vec<String> = self.trash.iter().filter(|(_, t)| t.deleted <= cutoff).map(|(k, _)| k.clone()).collect();
         for id in expired.into_iter().filter(|_| _lock.is_some()) {
             match std::fs::remove_file(self.trash_path(&id)) {
-                Ok(()) => { self.trash.remove(&id); dirty = true; }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => { self.trash.remove(&id); dirty = true; }
+                Ok(()) => { self.history().forget(&id); self.trash.remove(&id); dirty = true; }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => { self.history().forget(&id); self.trash.remove(&id); dirty = true; }
                 Err(e) => self.warnings.push(format!("无法清理过期回收站文档 {id}：{e}")),
             }
         }
@@ -901,6 +941,7 @@ impl Store {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
+            self.history().forget(&k);
             self.trash.remove(&k);
         }
         self.save_trash()

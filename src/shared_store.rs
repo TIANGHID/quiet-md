@@ -43,4 +43,7 @@ impl SharedStore {
     pub fn front_matter_of(&self, id: &str) -> String { self.0.borrow().front_matter_of(id) }
     pub fn open_local(&mut self, path: &std::path::Path) -> Result<String> { self.0.borrow_mut().open_local(path) }
     pub fn local_path(&self, id: &str) -> Option<std::path::PathBuf> { self.0.borrow().local_path(id) }
+    pub fn snapshots(&self, id: &str) -> Vec<crate::history::Snapshot> { self.0.borrow().snapshots(id) }
+    pub fn snapshot_doc(&self, id: &str, path: &std::path::Path) -> Result<Document> { self.0.borrow().snapshot_doc(id, path) }
+    pub fn restore_snapshot(&mut self, id: &str, path: &std::path::Path) -> Result<Document> { self.0.borrow_mut().restore_snapshot(id, path) }
 }

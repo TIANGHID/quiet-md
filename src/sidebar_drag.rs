@@ -415,7 +415,7 @@ impl Workspace {
     /// The row the selection pill sits on: the open doc, or the open folder.
     fn sidebar_pick(&self) -> Option<String> {
         match self.view {
-            crate::app::View::Doc => self.current.clone(),
+            crate::app::View::Doc | crate::app::View::History => self.current.clone(),
             crate::app::View::Folder => self.folder_current.clone(),
             _ => None,
         }
