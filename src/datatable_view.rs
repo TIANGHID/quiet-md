@@ -90,6 +90,10 @@ pub struct DataTableView {
     pub row_height_menu: Option<Point<Pixels>>,
     /// Field-header menu: (field index, anchor).
     pub field_menu: Option<(usize, Point<Pixels>)>,
+    /// Field editor (rename + change type): (field index, anchor).
+    pub field_editor: Option<(usize, Point<Pixels>)>,
+    /// Name box inside the field editor.
+    pub field_input: Entity<TextField>,
     /// Date picker: (record, field index, anchor, shown year, shown month).
     pub date_menu: Option<(usize, usize, Point<Pixels>, i64, u32)>,
     /// Column drag-resize in progress: (field id, mouse-down x, start width).
@@ -137,6 +141,18 @@ impl Workspace {
             _ => cx.notify(),
         })
         .detach();
+        let field_input = cx.new(|cx| {
+            let mut t = TextField::new("字段名称", cx);
+            t.size = 13.;
+            t
+        });
+        // Enter / Esc in the field-editor name box commits the rename and closes.
+        cx.subscribe_in(&field_input, window, |w, _, ev: &TextFieldEvent, _window, cx| match ev {
+            TextFieldEvent::Submit => { w.commit_field_rename(cx); if let Some(dt) = w.datatable.as_mut() { dt.field_editor = None; } cx.notify(); }
+            TextFieldEvent::Cancel => { if let Some(dt) = w.datatable.as_mut() { dt.field_editor = None; } cx.notify(); }
+            _ => {}
+        })
+        .detach();
         self.datatable = Some(DataTableView {
             table,
             view_idx: 0,
@@ -149,6 +165,8 @@ impl Workspace {
             select_menu: None,
             row_height_menu: None,
             field_menu: None,
+            field_editor: None,
+            field_input,
             date_menu: None,
             col_drag: None,
             row_sel: Default::default(),
@@ -226,7 +244,8 @@ impl Workspace {
         if self.view != View::DataTable { return false; }
         let Some(dt) = self.datatable.as_ref() else { return false };
         if dt.editing.is_some() || dt.add_field.is_some() || dt.select_menu.is_some()
-            || dt.date_menu.is_some() || dt.field_menu.is_some() || dt.row_height_menu.is_some() {
+            || dt.date_menu.is_some() || dt.field_menu.is_some() || dt.row_height_menu.is_some()
+            || dt.field_editor.is_some() {
             return false;
         }
         let km = ev.keystroke.modifiers;
@@ -307,6 +326,45 @@ impl Workspace {
         if let Some(dt) = self.datatable.as_mut() {
             dt.table.add_field(ty.label(), ty);
             dt.add_field = None;
+            cx.notify();
+        }
+    }
+
+    /// Open the field editor (rename + change type) for a field, prefilling and
+    /// focusing its name box.
+    fn open_field_editor(&mut self, fidx: usize, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            let name = dt.table.fields.get(fidx).map(|f| f.name.clone()).unwrap_or_default();
+            dt.field_menu = None;
+            dt.field_editor = Some((fidx, pos));
+            let input = dt.field_input.clone();
+            input.update(cx, |t, cx| { t.set_text(&name, cx); t.select_all_text(cx); });
+            window.focus(&input.read(cx).focus_handle(cx));
+            cx.notify();
+        }
+    }
+
+    fn commit_field_rename(&mut self, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_ref() {
+            let Some((fidx, _)) = dt.field_editor else { return };
+            let name = dt.field_input.read(cx).text.trim().to_string();
+            if name.is_empty() { return; }
+            let dt = self.datatable.as_mut().unwrap();
+            if let Some(f) = dt.table.fields.get_mut(fidx) { f.name = name; }
+            cx.notify();
+        }
+    }
+
+    /// Change a field's type from the editor. The primary column stays text.
+    fn change_field_type(&mut self, fidx: usize, ty: FieldType, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut()
+            && let Some(f) = dt.table.fields.get_mut(fidx) {
+            if fidx == 0 { return; } // primary is always the text title column
+            f.ty = ty;
+            // select options only make sense for select types
+            if !matches!(ty, FieldType::SingleSelect | FieldType::MultiSelect) {
+                f.config.options.clear();
+            }
             cx.notify();
         }
     }
@@ -922,7 +980,7 @@ impl Workspace {
                 popover().id("dt-field-menu").occlude().w(px(176.)).py(px(4.))
                     .on_mouse_down_out(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.field_menu = None; } cx.notify(); }))
                     .child(row("dt-fm-edit".into(), "square-pen", "编辑字段", false, false)
-                        .on_click(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.field_menu = None; } cx.notify(); })))
+                        .on_click(cx.listener(move |w, _, window, cx| w.open_field_editor(fidx, pos, window, cx))))
                     .child(row("dt-fm-insl".into(), "indent-decrease", "向左插入", false, false)
                         .on_click(cx.listener(move |w, _, _, cx| w.insert_field(fidx, cx))))
                     .child(row("dt-fm-insr".into(), "indent-increase", "向右插入", false, false)
@@ -938,10 +996,53 @@ impl Workspace {
             )).with_priority(5).into_any_element());
         }
 
+        if let Some((fidx, pos)) = dt.field_editor {
+            out.push(self.dt_field_editor(fidx, pos, cx));
+        }
+
         if let Some((rec, fidx, pos, y, m)) = dt.date_menu {
             out.push(self.dt_date_picker(rec, fidx, pos, y, m, cx));
         }
         out
+    }
+
+    /// Field editor: a name box plus a grouped type list with the current type
+    /// ticked (Feishu's 编辑字段). The primary column's type is locked.
+    fn dt_field_editor(&self, fidx: usize, pos: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dt) = self.datatable.as_ref() else { return div().into_any_element() };
+        let Some(field) = dt.table.fields.get(fidx).cloned() else { return div().into_any_element() };
+        let input = dt.field_input.clone();
+        let is_primary = fidx == 0;
+
+        let mut types = div().id("dt-fe-types").flex_none().max_h(px(300.)).overflow_y_scroll().pb(px(4.));
+        let mut group: Option<FieldGroup> = None;
+        for &ty in FieldType::all() {
+            if group != Some(ty.group()) {
+                group = Some(ty.group());
+                types = types.child(div().px(px(12.)).pt(px(8.)).pb(px(4.)).text_size(px(11.)).text_color(Theme::text_placeholder())
+                    .child(ty.group().label()));
+            }
+            let on = ty == field.ty;
+            let mut r = div().id(SharedString::from(format!("dt-fe-{}", ty.label()))).flex().items_center().gap(px(8.)).h(px(32.)).px(px(12.)).mx(px(4.)).rounded(px(6.))
+                .when(!is_primary, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())))
+                .child(icon(field_glyph(ty), 15., if on { Theme::primary() } else { Theme::text_caption() }))
+                .child(div().flex_1().text_size(px(13.)).text_color(if is_primary && !on { Theme::text_disabled() } else { Theme::text() }).child(ty.label()))
+                .when(on, |d| d.child(icon("check", 15., Theme::primary())));
+            if !is_primary {
+                r = r.on_click(cx.listener(move |w, _, _, cx| w.change_field_type(fidx, ty, cx)));
+            }
+            types = types.child(r);
+        }
+
+        deferred(anchored().anchor(Corner::TopLeft).position(pos).snap_to_window_with_margin(px(8.)).child(
+            popover().id("dt-field-editor").occlude().w(px(240.)).flex().flex_col()
+                .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.commit_field_rename(cx); if let Some(dt) = w.datatable.as_mut() { dt.field_editor = None; } cx.notify(); }))
+                .child(div().flex_none().m(px(8.)).h(px(32.)).px(px(8.)).flex().items_center()
+                    .rounded(px(6.)).border_1().border_color(Theme::line_border())
+                    .child(div().flex_1().child(input)))
+                .child(div().px(px(12.)).pb(px(2.)).text_size(px(11.)).text_color(Theme::text_placeholder()).child("字段类型"))
+                .child(types),
+        )).with_priority(6).into_any_element()
     }
 
     /// Feishu-style month calendar for a date cell.
