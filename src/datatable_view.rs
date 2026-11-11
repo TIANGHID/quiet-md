@@ -379,6 +379,38 @@ impl Workspace {
         }
     }
 
+    /// Sort the records by one field (Feishu's 升序/降序 on the column menu).
+    /// Empty cells sink to the bottom regardless of direction.
+    fn sort_records(&mut self, fidx: usize, asc: bool, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut()
+            && let Some(field) = dt.table.fields.get(fidx).cloned() {
+            let fid = field.id.clone();
+            // sort key: (is_empty, numeric, text) so blanks always trail
+            let key = |rec: &Record| -> (bool, f64, String) {
+                match rec.get(&fid) {
+                    CellValue::Empty => (true, 0.0, String::new()),
+                    CellValue::Number(n) => (false, *n, String::new()),
+                    CellValue::Rating(n) => (false, *n as f64, String::new()),
+                    CellValue::Date(ms) => (false, *ms as f64, String::new()),
+                    CellValue::Checkbox(b) => (false, if *b { 1.0 } else { 0.0 }, String::new()),
+                    other => (false, 0.0, other.as_plain(&field).to_lowercase()),
+                }
+            };
+            dt.table.records.sort_by(|a, b| {
+                let (ea, na, ta) = key(a);
+                let (eb, nb, tb) = key(b);
+                // blanks last in both directions
+                if ea != eb { return ea.cmp(&eb); }
+                let ord = na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal).then_with(|| ta.cmp(&tb));
+                if asc { ord } else { ord.reverse() }
+            });
+            dt.field_menu = None;
+            dt.sel = None;
+            dt.row_sel.clear();
+            cx.notify();
+        }
+    }
+
     fn hide_field(&mut self, fidx: usize, cx: &mut Context<Self>) {
         if let Some(dt) = self.datatable.as_mut() {
             if let Some(f) = dt.table.fields.get(fidx) {
@@ -1006,7 +1038,9 @@ impl Workspace {
                         .on_click(cx.listener(move |w, _, _, cx| w.insert_field(fidx + 1, cx))))
                     .child(dt_menu_divider())
                     .child(row("dt-fm-asc".into(), "sort-down", "升序", false, false)
-                        .on_click(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.field_menu = None; } cx.notify(); })))
+                        .on_click(cx.listener(move |w, _, _, cx| w.sort_records(fidx, true, cx))))
+                    .child(row("dt-fm-desc".into(), "sort-down", "降序", false, false)
+                        .on_click(cx.listener(move |w, _, _, cx| w.sort_records(fidx, false, cx))))
                     .child(row("dt-fm-hide".into(), "eye", "隐藏字段", false, is_primary)
                         .when(!is_primary, |d| d.on_click(cx.listener(move |w, _, _, cx| w.hide_field(fidx, cx)))))
                     .child(dt_menu_divider())
