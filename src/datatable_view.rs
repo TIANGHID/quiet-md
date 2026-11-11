@@ -83,6 +83,8 @@ pub struct DataTableView {
     pub select_menu: Option<(usize, usize, Point<Pixels>)>,
     /// 行高 menu anchor.
     pub row_height_menu: Option<Point<Pixels>>,
+    /// Field-header menu: (field index, anchor).
+    pub field_menu: Option<(usize, Point<Pixels>)>,
 }
 
 impl DataTableView {
@@ -117,6 +119,7 @@ impl Workspace {
             add_field: None,
             select_menu: None,
             row_height_menu: None,
+            field_menu: None,
         });
         self.view = View::DataTable;
         cx.notify();
@@ -191,6 +194,39 @@ impl Workspace {
         if let Some(dt) = self.datatable.as_mut() {
             dt.table.add_field(ty.label(), ty);
             dt.add_field = None;
+            cx.notify();
+        }
+    }
+
+    fn insert_field(&mut self, at: usize, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            let f = crate::datatable::Field::new(FieldType::Text.label(), FieldType::Text);
+            let at = at.min(dt.table.fields.len());
+            dt.table.fields.insert(at.max(1), f); // never before the primary column
+            dt.field_menu = None;
+            cx.notify();
+        }
+    }
+
+    fn hide_field(&mut self, fidx: usize, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            if let Some(f) = dt.table.fields.get(fidx) {
+                let id = f.id.clone();
+                let i = dt.view_idx;
+                if !dt.table.views[i].hidden.contains(&id) { dt.table.views[i].hidden.push(id); }
+            }
+            dt.field_menu = None;
+            cx.notify();
+        }
+    }
+
+    fn delete_field(&mut self, fidx: usize, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            if let Some(f) = dt.table.fields.get(fidx) {
+                let id = f.id.clone();
+                dt.table.remove_field(&id);
+            }
+            dt.field_menu = None;
             cx.notify();
         }
     }
@@ -388,8 +424,8 @@ impl Workspace {
             );
         for (fi, f) in fields.iter().enumerate() {
             header = header.child(
-                div().group("dt-hdr").relative().flex_none().w(px(f.width)).h_full().flex().items_center().gap(px(6.)).px(px(CELL_PAD_X))
-                    .border_r_1().border_color(Theme::table_line())
+                div().id(("dt-hdr", fi)).group("dt-hdr").relative().flex_none().w(px(f.width)).h_full().flex().items_center().gap(px(6.)).px(px(CELL_PAD_X))
+                    .border_r_1().border_color(Theme::table_line()).cursor_pointer()
                     .hover(|s| s.bg(Theme::fill_hover()))
                     // the primary (标题) column carries Feishu's lock glyph
                     .when(fi == 0, |d| d.child(icon("ft-lock", 13., Theme::text_placeholder())))
@@ -400,7 +436,12 @@ impl Workspace {
                     // never steals width from the name)
                     .child(div().absolute().right(px(4.)).top(px(12.)).flex().items_center().justify_center()
                         .size(px(16.)).rounded(px(4.)).bg(Theme::bg_body()).invisible().group_hover("dt-hdr", |s| s.visible())
-                        .child(icon("chevron-down", 13., Theme::text_caption()))),
+                        .child(icon("chevron-down", 13., Theme::text_caption())))
+                    .on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
+                        let p = ev.position();
+                        if let Some(dt) = w.datatable.as_mut() { dt.field_menu = Some((fi, point(p.x, p.y + px(8.)))); }
+                        cx.notify();
+                    })),
             );
         }
         // add-field "+"
@@ -418,13 +459,16 @@ impl Workspace {
         // body rows
         let mut body = div().id("dt-body").flex_1().min_h_0().overflow_scroll().flex().flex_col();
         for (ri, rec) in records.iter().enumerate() {
-            let mut row = div().flex_none().flex().h(px(row_h)).hover(|s| s.bg(Theme::block_bg_area()))
+            let mut row = div().group("dt-row").flex_none().flex().h(px(row_h)).hover(|s| s.bg(Theme::block_bg_area()))
                 .border_b_1().border_color(Theme::table_line())
                 .child(
-                    div().flex_none().w(px(GUTTER_W)).h_full().flex().items_center().justify_center()
+                    // gutter: the row number, which becomes a checkbox on hover (Feishu)
+                    div().relative().flex_none().w(px(GUTTER_W)).h_full().flex().items_center().justify_center()
                         .border_r_1().border_color(Theme::table_line())
-                        .text_size(px(12.)).text_color(Theme::text_placeholder())
-                        .child(format!("{}", ri + 1)),
+                        .child(div().group_hover("dt-row", |s| s.invisible())
+                            .text_size(px(12.)).text_color(Theme::text_placeholder())
+                            .child(format!("{}", ri + 1)))
+                        .child(div().absolute().invisible().group_hover("dt-row", |s| s.visible()).child(checkbox_box(false))),
                 );
             for (ci, f) in fields.iter().enumerate() {
                 let on = sel == Some((ri, ci));
@@ -495,8 +539,8 @@ impl Workspace {
                 row.into_any_element()
             }
             (FieldType::SingleSelect | FieldType::MultiSelect, CellValue::Select(ids)) => {
-                let fid = field.id.clone();
-                let mut row = div().id(("dt-sel", ri)).flex().items_center().gap(px(4.)).w_full().cursor_pointer();
+                let fidx = self.datatable.as_ref().and_then(|dt| dt.table.fields.iter().position(|f| f.id == field.id)).unwrap_or(0);
+                let mut row = div().id(("dt-sel", ri)).flex().items_center().gap(px(4.)).w_full().h_full().cursor_pointer();
                 for id in ids {
                     if let Some(opt) = field.option(id) {
                         row = row.child(select_pill(opt));
@@ -504,7 +548,7 @@ impl Workspace {
                 }
                 row.on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
                     let p = ev.position();
-                    if let Some(dt) = w.datatable.as_mut() { dt.select_menu = Some((ri, 0, point(p.x, p.y + px(6.)))); let _ = &fid; }
+                    if let Some(dt) = w.datatable.as_mut() { dt.select_menu = Some((ri, fidx, point(p.x, p.y + px(6.)))); }
                     cx.notify();
                 })).into_any_element()
             }
@@ -546,9 +590,13 @@ impl Workspace {
 
         if let Some(pos) = dt.add_field {
             out.push(deferred(anchored().anchor(Corner::TopLeft).position(pos).snap_to_window_with_margin(px(8.)).child(
-                popover().id("dt-field-types").occlude().w(px(220.)).max_h(px(420.)).overflow_hidden().flex().flex_col()
+                popover().id("dt-field-types").occlude().w(px(224.)).max_h(px(440.)).overflow_hidden().flex().flex_col()
                     .on_mouse_down_out(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.add_field = None; } cx.notify(); }))
-                    .child(div().id("dt-type-scroll").flex_1().min_h_0().overflow_y_scroll().py(px(4.))
+                    .child(div().flex_none().m(px(8.)).h(px(30.)).px(px(8.)).flex().items_center().gap(px(6.))
+                        .rounded(px(6.)).bg(crate::feishu_theme::c(ud::N100))
+                        .child(icon("search", 13., Theme::text_placeholder()))
+                        .child(div().text_size(px(13.)).text_color(Theme::text_placeholder()).child("搜索")))
+                    .child(div().id("dt-type-scroll").flex_1().min_h_0().overflow_y_scroll().pb(px(4.))
                         .children(self.dt_type_list(cx))),
             )).with_priority(5).into_any_element());
         }
@@ -557,17 +605,27 @@ impl Workspace {
             let field = dt.table.fields.get(fidx).cloned();
             if let Some(field) = field {
                 let fid = field.id.clone();
+                let current: Vec<String> = match dt.table.records.get(rec).map(|r| r.get(&field.id)) {
+                    Some(CellValue::Select(ids)) => ids.clone(),
+                    _ => Vec::new(),
+                };
                 out.push(deferred(anchored().anchor(Corner::TopLeft).position(pos).snap_to_window_with_margin(px(8.)).child(
-                    popover().id("dt-select-menu").occlude().w(px(200.)).py(px(4.))
+                    popover().id("dt-select-menu").occlude().w(px(220.)).flex().flex_col()
                         .on_mouse_down_out(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.select_menu = None; } cx.notify(); }))
-                        .children(field.config.options.iter().map(|o| {
+                        .child(div().flex_none().m(px(8.)).h(px(30.)).px(px(8.)).flex().items_center().gap(px(6.))
+                            .rounded(px(6.)).bg(crate::feishu_theme::c(ud::N100))
+                            .child(icon("search", 13., Theme::text_placeholder()))
+                            .child(div().text_size(px(13.)).text_color(Theme::text_placeholder()).child("搜索选项")))
+                        .child(div().id("dt-sel-scroll").flex_none().max_h(px(260.)).overflow_y_scroll().pb(px(4.)).children(field.config.options.iter().map(|o| {
                             let (fid, oid) = (fid.clone(), o.id.clone());
-                            div().id(SharedString::from(format!("dt-opt-{}", o.id))).flex().items_center().h(px(32.)).px(px(10.)).cursor_pointer()
+                            let on = current.contains(&o.id);
+                            div().id(SharedString::from(format!("dt-opt-{}", o.id))).flex().items_center().h(px(34.)).mx(px(4.)).px(px(8.)).rounded(px(6.)).cursor_pointer()
                                 .hover(|s| s.bg(Theme::fill_hover()))
-                                .child(select_pill(o))
+                                .child(div().flex_1().child(select_pill(o)))
+                                .when(on, |d| d.child(icon("check", 15., Theme::primary())))
                                 .on_click(cx.listener(move |w, _, _, cx| w.pick_select(rec, fid.clone(), oid.clone(), cx)))
                                 .into_any_element()
-                        })),
+                        }))),
                 )).with_priority(5).into_any_element());
             }
         }
@@ -591,6 +649,34 @@ impl Workspace {
                             }))
                             .into_any_element()
                     })),
+            )).with_priority(5).into_any_element());
+        }
+
+        if let Some((fidx, pos)) = dt.field_menu {
+            let is_primary = fidx == 0;
+            let row = |id: SharedString, glyph: &'static str, label: &'static str, danger: bool, disabled: bool| {
+                div().id(id).flex().items_center().gap(px(8.)).h(px(32.)).mx(px(4.)).px(px(8.)).rounded(px(6.))
+                    .when(!disabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())))
+                    .child(icon(glyph, 15., if disabled { Theme::text_disabled() } else if danger { Theme::danger() } else { Theme::icon() }))
+                    .child(div().text_size(px(13.)).text_color(if disabled { Theme::text_disabled() } else if danger { Theme::danger() } else { Theme::text() }).child(label))
+            };
+            out.push(deferred(anchored().anchor(Corner::TopLeft).position(pos).snap_to_window_with_margin(px(8.)).child(
+                popover().id("dt-field-menu").occlude().w(px(176.)).py(px(4.))
+                    .on_mouse_down_out(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.field_menu = None; } cx.notify(); }))
+                    .child(row("dt-fm-edit".into(), "square-pen", "编辑字段", false, false)
+                        .on_click(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.field_menu = None; } cx.notify(); })))
+                    .child(row("dt-fm-insl".into(), "indent-decrease", "向左插入", false, false)
+                        .on_click(cx.listener(move |w, _, _, cx| w.insert_field(fidx, cx))))
+                    .child(row("dt-fm-insr".into(), "indent-increase", "向右插入", false, false)
+                        .on_click(cx.listener(move |w, _, _, cx| w.insert_field(fidx + 1, cx))))
+                    .child(dt_menu_divider())
+                    .child(row("dt-fm-asc".into(), "sort-down", "升序", false, false)
+                        .on_click(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.field_menu = None; } cx.notify(); })))
+                    .child(row("dt-fm-hide".into(), "eye", "隐藏字段", false, is_primary)
+                        .when(!is_primary, |d| d.on_click(cx.listener(move |w, _, _, cx| w.hide_field(fidx, cx)))))
+                    .child(dt_menu_divider())
+                    .child(row("dt-fm-del".into(), "bin", "删除字段", true, is_primary)
+                        .when(!is_primary, |d| d.on_click(cx.listener(move |w, _, _, cx| w.delete_field(fidx, cx))))),
             )).with_priority(5).into_any_element());
         }
         out
@@ -620,6 +706,10 @@ impl Workspace {
 
 fn dt_divider() -> Div {
     div().flex_none().w(px(1.)).h(px(16.)).mx(px(4.)).bg(Theme::line_border())
+}
+
+fn dt_menu_divider() -> Div {
+    div().flex_none().h(px(1.)).my(px(4.)).mx(px(8.)).bg(Theme::line_border())
 }
 
 fn checkbox_box(on: bool) -> impl IntoElement {
