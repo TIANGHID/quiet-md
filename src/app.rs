@@ -1423,6 +1423,11 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_key_down(cx.listener(|w, ev: &KeyDownEvent, window, cx| {
+                // Data-table grid navigation (arrows / Tab / Enter / Space / Esc).
+                if w.datatable_key(ev, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
                 // The theme dropdown: ↑ ↓ preview, ↩ applies, Esc closes it (not 设置).
                 if w.theme_menu.is_some() && w.theme_menu_key(&ev.keystroke.key, cx) {
                     cx.stop_propagation();

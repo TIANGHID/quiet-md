@@ -134,6 +134,8 @@ impl Workspace {
             vscroll: ScrollHandle::new(),
         });
         self.view = View::DataTable;
+        // Give the grid the keyboard so arrow/Tab/Enter navigation works.
+        window.focus(&self.focus);
         cx.notify();
     }
 
@@ -193,6 +195,57 @@ impl Workspace {
         }
         window.focus(&self.focus);
         cx.notify();
+    }
+
+    /// Grid keyboard navigation (arrows / Tab / Enter / Space / Esc). Returns
+    /// true if it consumed the key. Called from the Workspace key handler; while
+    /// a cell editor or any popover is open the keyboard belongs to it.
+    pub(crate) fn datatable_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.view != View::DataTable { return false; }
+        let Some(dt) = self.datatable.as_ref() else { return false };
+        if dt.editing.is_some() || dt.add_field.is_some() || dt.select_menu.is_some()
+            || dt.date_menu.is_some() || dt.field_menu.is_some() || dt.row_height_menu.is_some() {
+            return false;
+        }
+        let km = ev.keystroke.modifiers;
+        if km.secondary() || km.alt || km.control || km.function { return false; }
+        // owned column (type, id) list so the &mut self action calls below don't
+        // clash with the borrow of `dt`.
+        let cols: Vec<(FieldType, String)> =
+            dt.table.visible_fields(dt.active_view()).iter().map(|f| (f.ty, f.id.clone())).collect();
+        let (ncols, nrows) = (cols.len(), dt.table.records.len());
+        if ncols == 0 || nrows == 0 { return false; }
+        let cur = dt.sel;
+        let key = ev.keystroke.key.clone();
+        let set = |w: &mut Workspace, r: usize, c: usize, cx: &mut Context<Workspace>| {
+            if let Some(dt) = w.datatable.as_mut() { dt.sel = Some((r, c)); dt.editing = None; }
+            cx.notify();
+        };
+        match key.as_str() {
+            "down" => { let (r, c) = cur.map_or((0, 0), |(r, c)| ((r + 1).min(nrows - 1), c)); set(self, r, c, cx); }
+            "up" => { let (r, c) = cur.unwrap_or((0, 0)); set(self, r.saturating_sub(1), c, cx); }
+            "left" => { let (r, c) = cur.unwrap_or((0, 0)); set(self, r, c.saturating_sub(1), cx); }
+            "right" => { let (r, c) = cur.map_or((0, 0), |(r, c)| (r, (c + 1).min(ncols - 1))); set(self, r, c, cx); }
+            "tab" => {
+                let (r, c) = cur.unwrap_or((0, 0));
+                let (r, c) = if km.shift {
+                    if c == 0 { (r.saturating_sub(1), ncols - 1) } else { (r, c - 1) }
+                } else if c + 1 >= ncols { ((r + 1).min(nrows - 1), 0) } else { (r, c + 1) };
+                set(self, r, c, cx);
+            }
+            "enter" => match cur {
+                Some((r, c)) if matches!(cols[c].0, FieldType::Checkbox) => self.toggle_checkbox(r, cols[c].1.clone(), cx),
+                Some((r, c)) => self.begin_cell_edit(r, c, window, cx),
+                None => return false,
+            },
+            "space" => match cur {
+                Some((r, c)) if matches!(cols[c].0, FieldType::Checkbox) => self.toggle_checkbox(r, cols[c].1.clone(), cx),
+                _ => return false,
+            },
+            "escape" if cur.is_some() => { if let Some(dt) = self.datatable.as_mut() { dt.sel = None; } cx.notify(); }
+            _ => return false,
+        }
+        true
     }
 
     fn add_record(&mut self, cx: &mut Context<Self>) {
