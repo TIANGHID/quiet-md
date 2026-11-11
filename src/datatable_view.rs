@@ -85,6 +85,8 @@ pub struct DataTableView {
     pub row_height_menu: Option<Point<Pixels>>,
     /// Field-header menu: (field index, anchor).
     pub field_menu: Option<(usize, Point<Pixels>)>,
+    /// Date picker: (record, field index, anchor, shown year, shown month).
+    pub date_menu: Option<(usize, usize, Point<Pixels>, i64, u32)>,
     /// Column drag-resize in progress: (field id, mouse-down x, start width).
     pub col_drag: Option<(String, f32, f32)>,
     /// Shared horizontal scroll so the header and body stay aligned.
@@ -126,6 +128,7 @@ impl Workspace {
             select_menu: None,
             row_height_menu: None,
             field_menu: None,
+            date_menu: None,
             col_drag: None,
             hscroll: ScrollHandle::new(),
             vscroll: ScrollHandle::new(),
@@ -263,6 +266,30 @@ impl Workspace {
             let rid = dt.table.records[rec].id.clone();
             dt.table.set_cell(&rid, &fid, CellValue::Select(vec![opt]));
             dt.select_menu = None;
+            cx.notify();
+        }
+    }
+
+    /// Open the calendar for a date cell, starting on the cell's month (or the
+    /// current month when empty).
+    fn open_date_menu(&mut self, rec: usize, fidx: usize, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            let secs = match dt.table.fields.get(fidx).map(|f| dt.table.records[rec].get(&f.id)) {
+                Some(CellValue::Date(ms)) => (*ms / 1000).max(0) as u64,
+                _ => crate::time::now(),
+            };
+            let (y, m, ..) = crate::time::civil(secs);
+            dt.date_menu = Some((rec, fidx, pos, y, m));
+            cx.notify();
+        }
+    }
+
+    fn set_date(&mut self, rec: usize, fid: String, y: i64, m: u32, d: u32, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            let rid = dt.table.records[rec].id.clone();
+            let ms = crate::time::local_to_unix(y, m, d, 0, 0) * 1000;
+            dt.table.set_cell(&rid, &fid, CellValue::Date(ms));
+            dt.date_menu = None;
             cx.notify();
         }
     }
@@ -616,8 +643,15 @@ impl Workspace {
                 div().w_full().flex().justify_end().text_size(px(13.)).text_color(Theme::text())
                     .child(ui_text(v.as_plain(field))).into_any_element()
             }
-            (FieldType::Date, CellValue::Date(ms)) => {
-                div().text_size(px(13.)).text_color(Theme::text()).child(ui_text(fmt_date(*ms))).into_any_element()
+            (FieldType::Date, _) => {
+                let fidx = self.datatable.as_ref().and_then(|dt| dt.table.fields.iter().position(|f| f.id == field.id)).unwrap_or(0);
+                let label = if let CellValue::Date(ms) = v { fmt_date(*ms) } else { String::new() };
+                div().id(("dt-date", ri)).w_full().h_full().flex().items_center().cursor_pointer()
+                    .text_size(px(13.)).text_color(Theme::text()).child(ui_text(label))
+                    .on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
+                        let p = ev.position();
+                        w.open_date_menu(ri, fidx, point(p.x, p.y + px(6.)), cx);
+                    })).into_any_element()
             }
             _ => {
                 let s = v.as_plain(field);
@@ -724,7 +758,75 @@ impl Workspace {
                         .when(!is_primary, |d| d.on_click(cx.listener(move |w, _, _, cx| w.delete_field(fidx, cx))))),
             )).with_priority(5).into_any_element());
         }
+
+        if let Some((rec, fidx, pos, y, m)) = dt.date_menu {
+            out.push(self.dt_date_picker(rec, fidx, pos, y, m, cx));
+        }
         out
+    }
+
+    /// Feishu-style month calendar for a date cell.
+    fn dt_date_picker(&self, rec: usize, fidx: usize, pos: Point<Pixels>, y: i64, m: u32, cx: &mut Context<Self>) -> AnyElement {
+        use crate::time::{civil, days_in_month, now, weekday};
+        let dt = self.datatable.as_ref();
+        let fid = dt.and_then(|dt| dt.table.fields.get(fidx)).map(|f| f.id.clone()).unwrap_or_default();
+        // the day currently stored in this cell (for the selected ring)
+        let sel = dt.and_then(|dt| match dt.table.records[rec].get(&fid) {
+            CellValue::Date(ms) => { let (yy, mm, dd, ..) = civil((*ms / 1000).max(0) as u64); Some((yy, mm, dd)) }
+            _ => None,
+        });
+        let (ty, tm, td, ..) = civil(now()); // today
+        let lead = weekday(y, m, 1) as usize; // 0=Mon leading blanks
+        let ndays = days_in_month(y, m);
+        let prev = move || if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+        let next = move || if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+
+        let (pv, nx) = (prev(), next());
+        let nav_prev = div().id("dt-date-prev").size(px(24.)).flex().items_center().justify_center().rounded(px(4.)).cursor_pointer()
+            .hover(|s| s.bg(Theme::fill_hover())).child(icon("chevron-left", 15., Theme::icon()))
+            .on_click(cx.listener(move |w, _, _, cx| {
+                if let Some(dt) = w.datatable.as_mut() && let Some(dm) = dt.date_menu.as_mut() { dm.3 = pv.0; dm.4 = pv.1; }
+                cx.notify();
+            }));
+        let nav_next = div().id("dt-date-next").size(px(24.)).flex().items_center().justify_center().rounded(px(4.)).cursor_pointer()
+            .hover(|s| s.bg(Theme::fill_hover())).child(icon("chevron-right", 15., Theme::icon()))
+            .on_click(cx.listener(move |w, _, _, cx| {
+                if let Some(dt) = w.datatable.as_mut() && let Some(dm) = dt.date_menu.as_mut() { dm.3 = nx.0; dm.4 = nx.1; }
+                cx.notify();
+            }));
+        let mut grid = div().flex().flex_wrap().px(px(8.));
+        for _ in 0..lead {
+            grid = grid.child(div().w(px(32.)).h(px(30.)));
+        }
+        for d in 1..=ndays {
+            let is_sel = sel == Some((y, m, d));
+            let is_today = (y, m, d) == (ty, tm, td);
+            let (fid2, yy, mm) = (fid.clone(), y, m);
+            grid = grid.child(
+                div().id(("dt-day", d as usize)).w(px(32.)).h(px(30.)).flex().items_center().justify_center()
+                    .child(div().size(px(26.)).flex().items_center().justify_center().rounded(px(13.)).cursor_pointer()
+                        .when(is_sel, |e| e.bg(Theme::primary()))
+                        .when(!is_sel && is_today, |e| e.border_1().border_color(Theme::primary()))
+                        .when(!is_sel, |e| e.hover(|s| s.bg(Theme::fill_hover())))
+                        .text_size(px(13.)).text_color(if is_sel { gpui::white() } else if is_today { Theme::primary() } else { Theme::text() })
+                        .child(format!("{d}")))
+                    .on_click(cx.listener(move |w, _, _, cx| w.set_date(rec, fid2.clone(), yy, mm, d, cx))),
+            );
+        }
+        let week = ["一", "二", "三", "四", "五", "六", "日"];
+        deferred(anchored().anchor(Corner::TopLeft).position(pos).snap_to_window_with_margin(px(8.)).child(
+            popover().id("dt-date-menu").occlude().w(px(252.)).py(px(8.))
+                .on_mouse_down_out(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.date_menu = None; } cx.notify(); }))
+                .child(div().flex().items_center().justify_between().px(px(12.)).pb(px(6.))
+                    .child(nav_prev)
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text()).child(format!("{y}年{m}月")))
+                    .child(nav_next))
+                .child(div().flex().px(px(8.)).pb(px(2.)).children(week.into_iter().map(|w| {
+                    div().w(px(32.)).h(px(24.)).flex().items_center().justify_center()
+                        .text_size(px(12.)).text_color(Theme::text_placeholder()).child(w)
+                })))
+                .child(grid),
+        )).with_priority(5).into_any_element()
     }
 
     fn dt_type_list(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
