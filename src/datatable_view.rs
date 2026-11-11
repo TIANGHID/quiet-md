@@ -462,11 +462,30 @@ impl Workspace {
             field.config.options.push(opt);
             oid
         };
+        let is_multi = matches!(field.ty, FieldType::MultiSelect);
         let (fid, rid) = (field.id.clone(), dt.table.records[rec].id.clone());
-        dt.table.set_cell(&rid, &fid, CellValue::Select(vec![oid]));
-        dt.select_menu = None;
+        if is_multi {
+            // append to the existing tags and keep the dropdown open
+            let mut ids = match dt.table.cell(&rid, &fid) { CellValue::Select(v) => v.clone(), _ => Vec::new() };
+            if !ids.contains(&oid) { ids.push(oid); }
+            dt.table.set_cell(&rid, &fid, CellValue::Select(ids));
+        } else {
+            dt.table.set_cell(&rid, &fid, CellValue::Select(vec![oid]));
+            dt.select_menu = None;
+        }
         dt.menu_input.update(cx, |t, cx| t.set_text("", cx));
         cx.notify();
+    }
+
+    /// Toggle one option in a multi-select cell, leaving the dropdown open.
+    fn toggle_select(&mut self, rec: usize, fid: String, oid: String, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            let rid = dt.table.records[rec].id.clone();
+            let mut ids = match dt.table.cell(&rid, &fid) { CellValue::Select(v) => v.clone(), _ => Vec::new() };
+            if let Some(p) = ids.iter().position(|i| *i == oid) { ids.remove(p); } else { ids.push(oid); }
+            dt.table.set_cell(&rid, &fid, if ids.is_empty() { CellValue::Empty } else { CellValue::Select(ids) });
+            cx.notify();
+        }
     }
 
     fn recolor_option(&mut self, fidx: usize, oid: String, color: u8, cx: &mut Context<Self>) {
@@ -1159,6 +1178,7 @@ impl Workspace {
         }
 
         // ---- option list + search/create ----
+        let is_multi = matches!(field.ty, FieldType::MultiSelect);
         let query = dt.menu_input.read(cx).text.trim().to_lowercase();
         let create_label = dt.menu_input.read(cx).text.trim().to_string();
         let exact = field.config.options.iter().any(|o| o.name.to_lowercase() == query);
@@ -1185,7 +1205,10 @@ impl Workspace {
                             if let Some(dt) = w.datatable.as_mut() { dt.opt_edit = Some(oid_edit.clone()); }
                             cx.notify();
                         })))
-                    .on_click(cx.listener(move |w, _, _, cx| w.pick_select(rec, fid2.clone(), oid.clone(), cx)))
+                    .on_click(cx.listener(move |w, _, _, cx| {
+                        if is_multi { w.toggle_select(rec, fid2.clone(), oid.clone(), cx); }
+                        else { w.pick_select(rec, fid2.clone(), oid.clone(), cx); }
+                    }))
                     .into_any_element(),
             );
         }
@@ -1285,24 +1308,37 @@ fn demo_table() -> Table {
     }
     let owner = t.add_field("负责人", FieldType::Person);
     let due = t.add_field("截止日期", FieldType::Date);
+    let tags = t.add_field("标签", FieldType::MultiSelect);
+    let (g_fe, g_be, g_design, g_doc);
+    {
+        let f = t.field_mut(&tags).unwrap();
+        let a = SelectOption::new("前端", 6);
+        let b = SelectOption::new("后端", 4);
+        let c = SelectOption::new("设计", 8);
+        let d = SelectOption::new("文档", 2);
+        (g_fe, g_be, g_design, g_doc) = (a.id.clone(), b.id.clone(), c.id.clone(), d.id.clone());
+        f.config.options = vec![a, b, c, d];
+        f.width = 160.;
+    }
     let done = t.add_field("已验收", FieldType::Checkbox);
     t.field_mut(&done).unwrap().width = 90.;
     let prio = t.add_field("优先级", FieldType::Rating);
     t.field_mut(&prio).unwrap().width = 120.;
 
     let rows = [
-        ("接入版本历史后端", &s_done, "舒斯达", 1_762_900_000_000i64, true, 3u8),
-        ("还原飞书多维表格 UI", &s_doing, "舒斯达", 1_763_200_000_000, false, 5),
-        ("数据表字段类型体系", &s_done, "林道琰", 1_762_700_000_000, true, 4),
-        ("内联 diff 高亮 (stage 2)", &s_todo, "刘心怡", 1_763_500_000_000, false, 2),
-        ("store 持久化接入", &s_todo, "舒斯达", 1_763_700_000_000, false, 4),
+        ("接入版本历史后端", &s_done, "舒斯达", 1_762_900_000_000i64, vec![&g_be], true, 3u8),
+        ("还原飞书多维表格 UI", &s_doing, "舒斯达", 1_763_200_000_000, vec![&g_fe, &g_design], false, 5),
+        ("数据表字段类型体系", &s_done, "林道琰", 1_762_700_000_000, vec![&g_fe, &g_be], true, 4),
+        ("内联 diff 高亮 (stage 2)", &s_todo, "刘心怡", 1_763_500_000_000, vec![&g_fe], false, 2),
+        ("store 持久化接入", &s_todo, "舒斯达", 1_763_700_000_000, vec![&g_be, &g_doc], false, 4),
     ];
-    for (i, (name, st, who, date, ok, stars)) in rows.into_iter().enumerate() {
+    for (i, (name, st, who, date, tg, ok, stars)) in rows.into_iter().enumerate() {
         let rid = t.records[i].id.clone();
         t.set_cell(&rid, &pid, CellValue::Text(name.into()));
         t.set_cell(&rid, &status, CellValue::Select(vec![st.clone()]));
         t.set_cell(&rid, &owner, CellValue::Person(vec![who.into()]));
         t.set_cell(&rid, &due, CellValue::Date(date));
+        t.set_cell(&rid, &tags, CellValue::Select(tg.into_iter().cloned().collect()));
         t.set_cell(&rid, &done, CellValue::Checkbox(ok));
         t.set_cell(&rid, &prio, CellValue::Rating(stars));
     }
