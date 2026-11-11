@@ -85,6 +85,12 @@ pub struct DataTableView {
     pub row_height_menu: Option<Point<Pixels>>,
     /// Field-header menu: (field index, anchor).
     pub field_menu: Option<(usize, Point<Pixels>)>,
+    /// Column drag-resize in progress: (field id, mouse-down x, start width).
+    pub col_drag: Option<(String, f32, f32)>,
+    /// Shared horizontal scroll so the header and body stay aligned.
+    pub hscroll: ScrollHandle,
+    /// Vertical scroll for the body rows.
+    pub vscroll: ScrollHandle,
 }
 
 impl DataTableView {
@@ -120,6 +126,9 @@ impl Workspace {
             select_menu: None,
             row_height_menu: None,
             field_menu: None,
+            col_drag: None,
+            hscroll: ScrollHandle::new(),
+            vscroll: ScrollHandle::new(),
         });
         self.view = View::DataTable;
         cx.notify();
@@ -284,6 +293,23 @@ impl Workspace {
         for overlay in self.dt_overlays(cx) {
             page = page.child(overlay);
         }
+        // Column drag-resize is tracked on the always-present page root (not a
+        // deferred overlay) so the live resize works even within a single frame:
+        // the handlers are registered every frame and only act while `col_drag`
+        // is set. A grip's mouse-down (in the header) sets `col_drag`.
+        let end = |w: &mut Workspace, cx: &mut Context<Workspace>| {
+            if let Some(dt) = w.datatable.as_mut() && dt.col_drag.take().is_some() { cx.notify(); }
+        };
+        page = page
+            .on_mouse_move(cx.listener(move |w, ev: &MouseMoveEvent, _, cx| {
+                let Some((fid, start_x, start_w)) = w.datatable.as_ref().and_then(|dt| dt.col_drag.clone()) else { return };
+                if ev.pressed_button != Some(MouseButton::Left) { return end(w, cx); }
+                let nw = (start_w + f32::from(ev.position.x) - start_x).max(crate::datatable::FIELD_MIN_WIDTH);
+                if let Some(dt) = w.datatable.as_mut()
+                    && let Some(f) = dt.table.fields.iter_mut().find(|f| f.id == fid) { f.width = nw; }
+                cx.notify();
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(move |w, _, _, cx| end(w, cx)));
         page.into_any_element()
     }
 
@@ -413,6 +439,8 @@ impl Workspace {
         let sel = dt.sel;
         let editing = dt.editing;
         let input = dt.input.clone();
+        let hscroll = dt.hscroll.clone();
+        let vscroll = dt.vscroll.clone();
 
         // header row (white, like Feishu; only the gridlines separate it)
         let mut header = div().flex_none().flex().h(px(HEADER_H)).bg(Theme::bg_body())
@@ -423,6 +451,7 @@ impl Workspace {
                     .child(checkbox_box(false)),
             );
         for (fi, f) in fields.iter().enumerate() {
+            let (fid, fw) = (f.id.clone(), f.width);
             header = header.child(
                 div().id(("dt-hdr", fi)).group("dt-hdr").relative().flex_none().w(px(f.width)).h_full().flex().items_center().gap(px(6.)).px(px(CELL_PAD_X))
                     .border_r_1().border_color(Theme::table_line()).cursor_pointer()
@@ -441,7 +470,18 @@ impl Workspace {
                         let p = ev.position();
                         if let Some(dt) = w.datatable.as_mut() { dt.field_menu = Some((fi, point(p.x, p.y + px(8.)))); }
                         cx.notify();
-                    })),
+                    }))
+                    // column drag-resize grip on the right edge (Feishu shows a blue bar)
+                    .child(
+                        div().id(("dt-colgrip", fi)).absolute().top_0().bottom_0().right(px(-3.)).w(px(7.)).flex().justify_center()
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .child(div().w(px(2.)).h_full().group_hover("dt-hdr", |s| s.bg(Theme::primary())))
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(dt) = w.datatable.as_mut() { dt.col_drag = Some((fid.clone(), f32::from(ev.position.x), fw)); }
+                                cx.notify();
+                            })),
+                    ),
             );
         }
         // add-field "+"
@@ -456,8 +496,9 @@ impl Workspace {
                 })),
         );
 
-        // body rows
-        let mut body = div().id("dt-body").flex_1().min_h_0().overflow_scroll().flex().flex_col();
+        // body rows — scrolls vertically; horizontal scroll is owned by the
+        // outer wrapper so the header moves in lock-step.
+        let mut body = div().id("dt-body").flex_1().min_h_0().overflow_y_scroll().track_scroll(&vscroll).flex().flex_col();
         for (ri, rec) in records.iter().enumerate() {
             let mut row = div().group("dt-row").flex_none().flex().h(px(row_h)).hover(|s| s.bg(Theme::block_bg_area()))
                 .border_b_1().border_color(Theme::table_line())
@@ -509,7 +550,11 @@ impl Workspace {
                 .on_click(cx.listener(|w, _, _, cx| w.add_record(cx))),
         );
 
-        div().flex_1().min_h_0().flex().flex_col().child(header).child(body).into_any_element()
+        // Header (pinned at top) and body stacked in a column of intrinsic
+        // width, wrapped in a single horizontal scroller so both pan together.
+        let content = div().flex().flex_col().h_full().child(header).child(body);
+        div().id("dt-xscroll").flex_1().min_h_0().overflow_x_scroll().track_scroll(&hscroll)
+            .child(content).into_any_element()
     }
 
     /// Render one cell's content by field type.
