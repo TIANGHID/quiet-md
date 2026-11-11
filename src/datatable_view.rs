@@ -77,6 +77,11 @@ pub struct DataTableView {
     /// The cell the inline input currently overlays.
     pub editing: Option<(usize, usize)>,
     pub input: Entity<TextField>,
+    /// Search/create box inside the single-select dropdown.
+    pub menu_input: Entity<TextField>,
+    /// When set, the select dropdown shows the editor for this option id
+    /// (recolor / delete) instead of the option list.
+    pub opt_edit: Option<String>,
     /// Add-field popover: where it hangs (None = closed).
     pub add_field: Option<Point<Pixels>>,
     /// Single/multi-select dropdown: (record, field, anchor).
@@ -118,12 +123,26 @@ impl Workspace {
             _ => {}
         })
         .detach();
+        let menu_input = cx.new(|cx| {
+            let mut t = TextField::new("搜索选项", cx);
+            t.size = 13.;
+            t
+        });
+        // Enter in the dropdown search box creates a new option; Esc closes it.
+        cx.subscribe_in(&menu_input, window, |w, _, ev: &TextFieldEvent, _window, cx| match ev {
+            TextFieldEvent::Submit => w.create_select_option(cx),
+            TextFieldEvent::Cancel => { if let Some(dt) = w.datatable.as_mut() { dt.select_menu = None; dt.opt_edit = None; } cx.notify(); }
+            _ => cx.notify(),
+        })
+        .detach();
         self.datatable = Some(DataTableView {
             table,
             view_idx: 0,
             sel: None,
             editing: None,
             input,
+            menu_input,
+            opt_edit: None,
             add_field: None,
             select_menu: None,
             row_height_menu: None,
@@ -319,6 +338,75 @@ impl Workspace {
             let rid = dt.table.records[rec].id.clone();
             dt.table.set_cell(&rid, &fid, CellValue::Select(vec![opt]));
             dt.select_menu = None;
+            dt.opt_edit = None;
+            cx.notify();
+        }
+    }
+
+    /// Open the single-select dropdown for a cell, resetting and focusing the
+    /// search/create box.
+    fn open_select_menu(&mut self, rec: usize, fidx: usize, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut() {
+            dt.select_menu = Some((rec, fidx, pos));
+            dt.opt_edit = None;
+            let input = dt.menu_input.clone();
+            input.update(cx, |t, cx| t.set_text("", cx));
+            window.focus(&input.read(cx).focus_handle(cx));
+            cx.notify();
+        }
+    }
+
+    /// Create a new option from the search box text (Feishu's 新建选项), give it
+    /// the next palette colour, and apply it to the record.
+    fn create_select_option(&mut self, cx: &mut Context<Self>) {
+        let Some(dt) = self.datatable.as_ref() else { return };
+        let Some((rec, fidx, _)) = dt.select_menu else { return };
+        let name = dt.menu_input.read(cx).text.trim().to_string();
+        if name.is_empty() { return; }
+        let dt = self.datatable.as_mut().unwrap();
+        let Some(field) = dt.table.fields.get_mut(fidx) else { return };
+        // reuse an existing option of the same name rather than duplicating
+        let oid = if let Some(o) = field.config.options.iter().find(|o| o.name == name) {
+            o.id.clone()
+        } else {
+            let color = (field.config.options.len() % SELECT_PALETTE.len()) as u8;
+            let opt = SelectOption::new(&name, color);
+            let oid = opt.id.clone();
+            field.config.options.push(opt);
+            oid
+        };
+        let (fid, rid) = (field.id.clone(), dt.table.records[rec].id.clone());
+        dt.table.set_cell(&rid, &fid, CellValue::Select(vec![oid]));
+        dt.select_menu = None;
+        dt.menu_input.update(cx, |t, cx| t.set_text("", cx));
+        cx.notify();
+    }
+
+    fn recolor_option(&mut self, fidx: usize, oid: String, color: u8, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut()
+            && let Some(field) = dt.table.fields.get_mut(fidx)
+            && let Some(o) = field.config.options.iter_mut().find(|o| o.id == oid) {
+            o.color = color;
+            cx.notify();
+        }
+    }
+
+    fn delete_option(&mut self, fidx: usize, oid: String, cx: &mut Context<Self>) {
+        if let Some(dt) = self.datatable.as_mut()
+            && let Some(field) = dt.table.fields.get_mut(fidx) {
+            field.config.options.retain(|o| o.id != oid);
+            let fid = field.id.clone();
+            // scrub the deleted option out of every cell
+            for r in 0..dt.table.records.len() {
+                let rid = dt.table.records[r].id.clone();
+                if let CellValue::Select(ids) = dt.table.cell(&rid, &fid) {
+                    let kept: Vec<String> = ids.iter().filter(|i| **i != oid).cloned().collect();
+                    if kept.len() != ids.len() {
+                        dt.table.set_cell(&rid, &fid, if kept.is_empty() { CellValue::Empty } else { CellValue::Select(kept) });
+                    }
+                }
+            }
+            dt.opt_edit = None;
             cx.notify();
         }
     }
@@ -671,20 +759,18 @@ impl Workspace {
                         row = row.child(select_pill(opt));
                     }
                 }
-                row.on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
+                row.on_click(cx.listener(move |w, ev: &ClickEvent, window, cx| {
                     let p = ev.position();
-                    if let Some(dt) = w.datatable.as_mut() { dt.select_menu = Some((ri, fidx, point(p.x, p.y + px(6.)))); }
-                    cx.notify();
+                    w.open_select_menu(ri, fidx, point(p.x, p.y + px(6.)), window, cx);
                 })).into_any_element()
             }
             (FieldType::SingleSelect | FieldType::MultiSelect, _) => {
                 // empty select: clicking opens the option menu
                 let fidx = self.datatable.as_ref().and_then(|dt| dt.table.fields.iter().position(|f| f.id == field.id)).unwrap_or(0);
                 div().id(("dt-sel-empty", ri)).w_full().h_full().cursor_pointer()
-                    .on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
+                    .on_click(cx.listener(move |w, ev: &ClickEvent, window, cx| {
                         let p = ev.position();
-                        if let Some(dt) = w.datatable.as_mut() { dt.select_menu = Some((ri, fidx, point(p.x, p.y + px(6.)))); }
-                        cx.notify();
+                        w.open_select_menu(ri, fidx, point(p.x, p.y + px(6.)), window, cx);
                     })).into_any_element()
             }
             (_, CellValue::Url { text, href }) => {
@@ -734,32 +820,7 @@ impl Workspace {
         }
 
         if let Some((rec, fidx, pos)) = dt.select_menu {
-            let field = dt.table.fields.get(fidx).cloned();
-            if let Some(field) = field {
-                let fid = field.id.clone();
-                let current: Vec<String> = match dt.table.records.get(rec).map(|r| r.get(&field.id)) {
-                    Some(CellValue::Select(ids)) => ids.clone(),
-                    _ => Vec::new(),
-                };
-                out.push(deferred(anchored().anchor(Corner::TopLeft).position(pos).snap_to_window_with_margin(px(8.)).child(
-                    popover().id("dt-select-menu").occlude().w(px(220.)).flex().flex_col()
-                        .on_mouse_down_out(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.select_menu = None; } cx.notify(); }))
-                        .child(div().flex_none().m(px(8.)).h(px(30.)).px(px(8.)).flex().items_center().gap(px(6.))
-                            .rounded(px(6.)).bg(crate::feishu_theme::c(ud::N100))
-                            .child(icon("search", 13., Theme::text_placeholder()))
-                            .child(div().text_size(px(13.)).text_color(Theme::text_placeholder()).child("搜索选项")))
-                        .child(div().id("dt-sel-scroll").flex_none().max_h(px(260.)).overflow_y_scroll().pb(px(4.)).children(field.config.options.iter().map(|o| {
-                            let (fid, oid) = (fid.clone(), o.id.clone());
-                            let on = current.contains(&o.id);
-                            div().id(SharedString::from(format!("dt-opt-{}", o.id))).flex().items_center().h(px(34.)).mx(px(4.)).px(px(8.)).rounded(px(6.)).cursor_pointer()
-                                .hover(|s| s.bg(Theme::fill_hover()))
-                                .child(div().flex_1().child(select_pill(o)))
-                                .when(on, |d| d.child(icon("check", 15., Theme::primary())))
-                                .on_click(cx.listener(move |w, _, _, cx| w.pick_select(rec, fid.clone(), oid.clone(), cx)))
-                                .into_any_element()
-                        }))),
-                )).with_priority(5).into_any_element());
-            }
+            out.push(self.dt_select_menu(rec, fidx, pos, cx));
         }
 
         if let Some(pos) = dt.row_height_menu {
@@ -879,6 +940,109 @@ impl Workspace {
                         .text_size(px(12.)).text_color(Theme::text_placeholder()).child(w)
                 })))
                 .child(grid),
+        )).with_priority(5).into_any_element()
+    }
+
+    /// The single-select dropdown: a search/create box, the (filtered) options
+    /// with a per-option editor entry, and — when an option is being edited —
+    /// an in-place recolor/delete panel.
+    fn dt_select_menu(&self, rec: usize, fidx: usize, pos: Point<Pixels>, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dt) = self.datatable.as_ref() else { return div().into_any_element() };
+        let Some(field) = dt.table.fields.get(fidx).cloned() else { return div().into_any_element() };
+        let fid = field.id.clone();
+        let current: Vec<String> = match dt.table.records.get(rec).map(|r| r.get(&field.id)) {
+            Some(CellValue::Select(ids)) => ids.clone(),
+            _ => Vec::new(),
+        };
+        let close = cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.select_menu = None; dt.opt_edit = None; } cx.notify(); });
+
+        // ---- option editor (recolor / delete) ----
+        if let Some(oid) = dt.opt_edit.clone() {
+            let opt = field.config.options.iter().find(|o| o.id == oid).cloned();
+            let mut panel = div().flex().flex_col();
+            panel = panel
+                .child(div().flex().items_center().gap(px(6.)).h(px(36.)).px(px(8.))
+                    .child(div().id("dt-opt-back").size(px(24.)).flex().items_center().justify_center().rounded(px(4.)).cursor_pointer()
+                        .hover(|s| s.bg(Theme::fill_hover())).child(icon("chevron-left", 15., Theme::icon()))
+                        .on_click(cx.listener(|w, _, _, cx| { if let Some(dt) = w.datatable.as_mut() { dt.opt_edit = None; } cx.notify(); })))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text()).child("编辑选项")));
+            if let Some(opt) = opt {
+                panel = panel.child(div().flex().items_center().justify_center().py(px(6.)).child(select_pill(&opt)));
+                let mut swatches = div().flex().flex_wrap().gap(px(10.)).px(px(14.)).py(px(6.));
+                for slot in 0..SELECT_PALETTE.len() as u8 {
+                    let (bg, _) = select_colors(slot);
+                    let is = opt.color == slot;
+                    let oid2 = oid.clone();
+                    swatches = swatches.child(
+                        div().id(("dt-sw", slot as usize)).size(px(22.)).rounded(px(11.)).bg(bg).cursor_pointer()
+                            .when(is, |d| d.border_2().border_color(Theme::primary()))
+                            .on_click(cx.listener(move |w, _, _, cx| w.recolor_option(fidx, oid2.clone(), slot, cx))),
+                    );
+                }
+                let oid3 = oid.clone();
+                panel = panel.child(swatches).child(dt_menu_divider())
+                    .child(div().id("dt-opt-del").flex().items_center().gap(px(8.)).h(px(32.)).mx(px(4.)).px(px(8.)).rounded(px(6.)).cursor_pointer()
+                        .hover(|s| s.bg(Theme::fill_hover())).child(icon("bin", 15., Theme::danger()))
+                        .child(div().text_size(px(13.)).text_color(Theme::danger()).child("删除选项"))
+                        .on_click(cx.listener(move |w, _, _, cx| w.delete_option(fidx, oid3.clone(), cx))));
+            }
+            return deferred(anchored().anchor(Corner::TopLeft).position(pos).snap_to_window_with_margin(px(8.)).child(
+                popover().id("dt-opt-editor").occlude().w(px(220.)).flex().flex_col().pb(px(6.))
+                    .on_mouse_down_out(close).child(panel),
+            )).with_priority(6).into_any_element();
+        }
+
+        // ---- option list + search/create ----
+        let query = dt.menu_input.read(cx).text.trim().to_lowercase();
+        let create_label = dt.menu_input.read(cx).text.trim().to_string();
+        let exact = field.config.options.iter().any(|o| o.name.to_lowercase() == query);
+        let show_create = !query.is_empty() && !exact;
+        let input = dt.menu_input.clone();
+        let filtered: Vec<SelectOption> = field.config.options.iter()
+            .filter(|o| query.is_empty() || o.name.to_lowercase().contains(&query)).cloned().collect();
+
+        let mut list = div().id("dt-sel-scroll").flex_none().max_h(px(240.)).overflow_y_scroll().pb(px(4.));
+        for o in &filtered {
+            let (fid2, oid) = (fid.clone(), o.id.clone());
+            let on = current.contains(&o.id);
+            let oid_edit = o.id.clone();
+            list = list.child(
+                div().id(SharedString::from(format!("dt-opt-{}", o.id))).group("dt-optrow").flex().items_center().gap(px(6.)).h(px(34.)).mx(px(4.)).px(px(8.)).rounded(px(6.)).cursor_pointer()
+                    .hover(|s| s.bg(Theme::fill_hover()))
+                    .child(div().flex_1().min_w_0().child(select_pill(o)))
+                    .when(on, |d| d.child(icon("check", 15., Theme::primary())))
+                    .child(div().id(SharedString::from(format!("dt-opte-{}", o.id))).invisible().group_hover("dt-optrow", |s| s.visible())
+                        .size(px(22.)).flex().items_center().justify_center().rounded(px(4.)).hover(|s| s.bg(Theme::fill_active()))
+                        .child(icon("ellipsis", 15., Theme::icon()))
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |w, _, _, cx| {
+                            cx.stop_propagation();
+                            if let Some(dt) = w.datatable.as_mut() { dt.opt_edit = Some(oid_edit.clone()); }
+                            cx.notify();
+                        })))
+                    .on_click(cx.listener(move |w, _, _, cx| w.pick_select(rec, fid2.clone(), oid.clone(), cx)))
+                    .into_any_element(),
+            );
+        }
+        if show_create {
+            list = list.child(
+                div().id("dt-opt-create").flex().items_center().gap(px(6.)).h(px(34.)).mx(px(4.)).px(px(8.)).rounded(px(6.)).cursor_pointer()
+                    .hover(|s| s.bg(Theme::fill_hover()))
+                    .child(icon("plus", 14., Theme::primary()))
+                    .child(div().text_size(px(13.)).text_color(Theme::text_caption()).child("新建"))
+                    .child(select_pill(&SelectOption::new(&create_label, (field.config.options.len() % SELECT_PALETTE.len()) as u8)))
+                    .on_click(cx.listener(|w, _, _, cx| w.create_select_option(cx)))
+                    .into_any_element(),
+            );
+        }
+
+        deferred(anchored().anchor(Corner::TopLeft).position(pos).snap_to_window_with_margin(px(8.)).child(
+            popover().id("dt-select-menu").occlude().w(px(224.)).flex().flex_col()
+                .on_mouse_down_out(close)
+                .child(div().flex_none().m(px(8.)).h(px(32.)).px(px(8.)).flex().items_center().gap(px(6.))
+                    .rounded(px(6.)).bg(crate::feishu_theme::c(ud::N100))
+                    .child(icon("search", 13., Theme::text_placeholder()))
+                    .child(div().flex_1().child(input)))
+                .child(list),
         )).with_priority(5).into_any_element()
     }
 
