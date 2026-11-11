@@ -256,7 +256,8 @@ impl Workspace {
             dt.table.visible_fields(dt.active_view()).iter().map(|f| (f.ty, f.id.clone())).collect();
         let (ncols, nrows) = (cols.len(), dt.table.records.len());
         if ncols == 0 || nrows == 0 { return false; }
-        let cur = dt.sel;
+        // ignore a stale selection left over from a structural change
+        let cur = dt.sel.filter(|&(r, c)| r < nrows && c < ncols);
         let key = ev.keystroke.key.clone();
         let set = |w: &mut Workspace, r: usize, c: usize, cx: &mut Context<Workspace>| {
             if let Some(dt) = w.datatable.as_mut() { dt.sel = Some((r, c)); dt.editing = None; }
@@ -375,6 +376,7 @@ impl Workspace {
             let at = at.min(dt.table.fields.len());
             dt.table.fields.insert(at.max(1), f); // never before the primary column
             dt.field_menu = None;
+            dt.sel = None; // column indices shift
             cx.notify();
         }
     }
@@ -419,6 +421,7 @@ impl Workspace {
                 if !dt.table.views[i].hidden.contains(&id) { dt.table.views[i].hidden.push(id); }
             }
             dt.field_menu = None;
+            dt.sel = None; // column indices shift
             cx.notify();
         }
     }
@@ -430,6 +433,7 @@ impl Workspace {
                 dt.table.remove_field(&id);
             }
             dt.field_menu = None;
+            dt.sel = None; // column indices shift
             cx.notify();
         }
     }
