@@ -52,18 +52,19 @@ pub fn select_colors(slot: u8) -> (Hsla, Hsla) {
 fn field_glyph(ty: FieldType) -> &'static str {
     use FieldType::*;
     match ty {
-        Text | Phone | Email | Barcode | Location | Signature => "file-text",
-        SingleSelect => "chevron-down",
-        MultiSelect => "list",
-        Checkbox => "todo-check",
-        Number | Currency | AutoNumber => "sigma",
+        Text | Phone | Email | Barcode | Location | Signature => "ft-text",
+        SingleSelect => "ft-select",
+        MultiSelect => "ft-multi",
+        Checkbox => "ft-check",
+        Number | Currency | AutoNumber => "ft-number",
         Formula => "sigma",
         Rating => "star",
-        Date | CreatedTime | ModifiedTime => "info",
-        Url => "export",
-        Person | Group | CreatedBy | ModifiedBy => "home",
-        Progress => "view-list",
-        _ => "file-text",
+        Date | CreatedTime | ModifiedTime => "ft-date",
+        Url => "ft-link",
+        Attachment => "ft-attach",
+        Person | Group | CreatedBy | ModifiedBy => "ft-person",
+        Progress => "ft-number",
+        _ => "ft-text",
     }
 }
 
@@ -231,30 +232,72 @@ impl Workspace {
         let title = dt.table.name.clone();
 
         let top = self.dt_titlebar(&title, cx);
+        let rail = self.dt_rail(cx);
         let tabs = self.dt_tab_bar(cx);
         let toolbar = self.dt_toolbar(cx);
         let grid = self.dt_grid(&fields, row_h, window, cx);
 
+        let main = div().flex_1().min_w_0().h_full().flex().flex_col()
+            .child(tabs).child(toolbar).child(grid);
+        let body = div().flex_1().min_h_0().flex().child(rail).child(main);
+
         let mut page = div()
             .flex_1().min_w_0().h_full().flex().flex_col().bg(Theme::bg_body())
             .child(top)
-            .child(tabs)
-            .child(toolbar)
-            .child(grid);
+            .child(body);
         for overlay in self.dt_overlays(cx) {
             page = page.child(overlay);
         }
         page.into_any_element()
     }
 
+    /// Feishu's base rail: 搜索, then 数据表 / 仪表盘 / 工作流, 新建 at the foot.
+    fn dt_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let item = |id: &'static str, glyph: &'static str, label: &'static str, on: bool| {
+            div().id(id).flex().items_center().gap(px(8.)).h(px(32.)).px(px(10.)).mx(px(8.)).rounded(px(6.)).cursor_pointer()
+                .when(on, |d| d.bg(Theme::fill_active()))
+                .when(!on, |d| d.hover(|s| s.bg(Theme::fill_hover())))
+                .child(icon(glyph, 16., if on { Theme::primary() } else { Theme::icon() }))
+                .child(div().text_size(px(13.)).font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                    .text_color(if on { Theme::primary() } else { Theme::text() }).child(label))
+        };
+        div()
+            .flex_none().w(px(224.)).h_full().flex().flex_col()
+            .bg(crate::feishu_theme::c(ud::N50))
+            .border_r_1().border_color(Theme::line_border())
+            .child(
+                div().flex_none().h(px(44.)).flex().items_center().gap(px(8.)).px(px(16.))
+                    .child(icon("search", 15., Theme::text_placeholder()))
+                    .child(div().flex_1().text_size(px(13.)).text_color(Theme::text_placeholder()).child("搜索"))
+                    .child(icon("plus", 15., Theme::icon())),
+            )
+            .child(div().h(px(4.)))
+            .child(item("dt-rail-table", "view-grid", "数据表", true)
+                .on_click(cx.listener(|_, _, _, cx| cx.notify())))
+            .child(item("dt-rail-dash", "storage", "仪表盘", false))
+            .child(item("dt-rail-flow", "list", "工作流", false))
+            .child(div().flex_1())
+            .child(
+                div().id("dt-rail-new").flex().items_center().justify_center().gap(px(6.)).h(px(34.)).mx(px(12.)).mb(px(12.)).rounded(px(8.))
+                    .border_1().border_color(Theme::line_border()).cursor_pointer().hover(|s| s.bg(Theme::fill_hover()))
+                    .child(icon("plus", 14., Theme::icon()))
+                    .child(div().text_size(px(13.)).text_color(Theme::text()).child("新建")),
+            )
+            .into_any_element()
+    }
+
     fn dt_titlebar(&self, title: &str, cx: &mut Context<Self>) -> AnyElement {
+        let tool = |id: &'static str, glyph: &'static str| {
+            div().id(id).flex_none().size(px(30.)).flex().items_center().justify_center().rounded(px(6.)).cursor_pointer()
+                .hover(|s| s.bg(Theme::fill_hover())).child(icon(glyph, 17., Theme::icon()))
+        };
         div()
             .flex_none().h(px(crate::app::HEADER_H)).flex().items_center()
-            .pl(px(if self.sidebar_open { 16. } else { crate::feishu_theme::TRAFFIC_LIGHTS_W }))
+            .pl(px(crate::feishu_theme::TRAFFIC_LIGHTS_W))
             .pr(px(crate::ui::header_right_inset()))
             .border_b_1().border_color(Theme::line_border())
             .child(
-                div().id("dt-back").flex_none().size(px(28.)).ml(px(4.)).mr(px(8.))
+                div().id("dt-back").flex_none().size(px(28.)).mr(px(8.))
                     .flex().items_center().justify_center().rounded(px(8.)).cursor_pointer()
                     .hover(|s| s.bg(Theme::fill_hover_strong()))
                     .child(icon("arrow-left", 17., Theme::icon()))
@@ -264,6 +307,16 @@ impl Workspace {
             .child(div().ml(px(8.)).text_size(px(15.)).line_height(px(22.)).font_weight(FontWeight::SEMIBOLD)
                 .text_color(Theme::text()).child(ui_text(title.to_string())))
             .child(div().flex_1())
+            .child(tool("dt-tb-undo", "restore"))
+            .child(tool("dt-tb-redo", "restore"))
+            .child(tool("dt-tb-search", "search"))
+            .child(div().w(px(6.)))
+            .child(
+                div().id("dt-share").flex_none().flex().items_center().gap(px(5.)).h(px(32.)).px(px(12.)).ml(px(2.)).rounded(px(6.))
+                    .bg(Theme::primary()).cursor_pointer().hover(|s| s.opacity(0.9))
+                    .child(icon("export", 14., gpui::white()))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(gpui::white()).child("分享")),
+            )
             .into_any_element()
     }
 
@@ -303,6 +356,7 @@ impl Workspace {
                 .on_click(cx.listener(|w, _, _, cx| w.add_record(cx))))
             .child(dt_divider())
             .child(item("dt-fields", "view-settings", "字段配置", false))
+            .child(item("dt-viewcfg", "eye", "视图配置", false))
             .child(item("dt-filter", "text-search", "筛选", false))
             .child(item("dt-group", "list", "分组", false))
             .child(item("dt-sort", "sort-down", "排序", false))
@@ -324,21 +378,29 @@ impl Workspace {
         let editing = dt.editing;
         let input = dt.input.clone();
 
-        // header row
-        let mut header = div().flex_none().flex().h(px(HEADER_H)).bg(Theme::table_header())
+        // header row (white, like Feishu; only the gridlines separate it)
+        let mut header = div().flex_none().flex().h(px(HEADER_H)).bg(Theme::bg_body())
             .border_b_1().border_color(Theme::table_line())
             .child(
                 div().flex_none().w(px(GUTTER_W)).h_full().flex().items_center().justify_center()
                     .border_r_1().border_color(Theme::table_line())
                     .child(checkbox_box(false)),
             );
-        for f in fields {
+        for (fi, f) in fields.iter().enumerate() {
             header = header.child(
-                div().flex_none().w(px(f.width)).h_full().flex().items_center().gap(px(6.)).px(px(CELL_PAD_X))
+                div().group("dt-hdr").relative().flex_none().w(px(f.width)).h_full().flex().items_center().gap(px(6.)).px(px(CELL_PAD_X))
                     .border_r_1().border_color(Theme::table_line())
+                    .hover(|s| s.bg(Theme::fill_hover()))
+                    // the primary (标题) column carries Feishu's lock glyph
+                    .when(fi == 0, |d| d.child(icon("ft-lock", 13., Theme::text_placeholder())))
                     .child(icon(field_glyph(f.ty), 14., Theme::text_caption()))
-                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis()
-                        .text_size(px(13.)).text_color(Theme::text()).child(ui_text(f.name.clone()))),
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis()
+                        .text_size(px(13.)).text_color(Theme::text()).child(ui_text(f.name.clone())))
+                    // the field-menu chevron, shown on hover like Feishu (absolute so it
+                    // never steals width from the name)
+                    .child(div().absolute().right(px(4.)).top(px(12.)).flex().items_center().justify_center()
+                        .size(px(16.)).rounded(px(4.)).bg(Theme::bg_body()).invisible().group_hover("dt-hdr", |s| s.visible())
+                        .child(icon("chevron-down", 13., Theme::text_caption()))),
             );
         }
         // add-field "+"
