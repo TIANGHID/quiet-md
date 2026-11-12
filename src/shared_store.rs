@@ -43,4 +43,8 @@ impl SharedStore {
     pub fn front_matter_of(&self, id: &str) -> String { self.0.borrow().front_matter_of(id) }
     pub fn open_local(&mut self, path: &std::path::Path) -> Result<String> { self.0.borrow_mut().open_local(path) }
     pub fn local_path(&self, id: &str) -> Option<std::path::PathBuf> { self.0.borrow().local_path(id) }
+    pub fn list_versions(&self, id: &str) -> Vec<VersionEntry> { self.0.borrow().list_versions(id) }
+    pub fn version_preview(&self, id: &str, version_id: &str) -> String { self.0.borrow().version_preview(id, version_id) }
+    pub fn restore_version(&mut self, id: &str, version_id: &str) -> Result<()> { self.0.borrow_mut().restore_version(id, version_id) }
+    pub fn set_version_policy(&self, policy: VersionPolicy) { self.0.borrow_mut().set_version_policy(policy) }
 }

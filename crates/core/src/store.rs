@@ -12,6 +12,8 @@ use crate::time::now;
 use std::time::UNIX_EPOCH;
 #[path = "file_history.rs"] mod file_history;
 pub use file_history::{FileState, FileDelta, FileChanges};
+#[path = "versions.rs"] mod versions;
+pub use versions::{VersionEntry, VersionPolicy};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Meta {
@@ -225,6 +227,8 @@ pub struct Store {
     /// Problems found while opening the library (a damaged index recovered
     /// from its backup …), for the window to tell the user once.
     pub warnings: Vec<String>,
+    /// Snapshot policy, injected from preferences once the library is open.
+    version_policy: VersionPolicy,
 }
 
 /// The parts of an `Entry` that come from the document file.
@@ -391,7 +395,7 @@ impl Store {
         }
         let index = load_json(&root.join("index.json"), "文档索引", &mut warnings);
         let trash = load_json(&root.join("trash").join("index.json"), "回收站索引", &mut warnings);
-        let mut store = Store { file_changes: vec![], root, index, trash, warnings, loaded: Default::default(), copied: Default::default(), parsed: HashMap::new() };
+        let mut store = Store { file_changes: vec![], root, index, trash, warnings, loaded: Default::default(), copied: Default::default(), parsed: HashMap::new(), version_policy: Default::default() };
         if let Ok(entries) = std::fs::read_dir(store.recovery_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -618,6 +622,12 @@ impl Store {
                 }
             }
             write_atomic(&self.path(id), xml.as_bytes())?;
+            // Versions are a convenience: a snapshot that fails (a full disk,
+            // a read-only folder) must never turn a saved document into a
+            // failed save. Report it as a library warning instead.
+            if let Err(e) = self.record_version(id, &xml, &doc.title.text, false) {
+                self.warnings.push(format!("历史版本保存失败：{e}"));
+            }
         }
         self.loaded.borrow_mut().insert(id.to_string(), if same { disk.unwrap_or(xml) } else { xml });
         if let Some(title) = title.filter(|t| *t != self.markdown_title(id)) { self.retitle_markdown(id, &title)?; }
@@ -1453,7 +1463,7 @@ mod tests {
         let index = std::fs::read(trash.join("index.json")).unwrap();
         std::fs::rename(&trash, lib.0.join("trash-away")).unwrap();
         std::fs::write(&trash, b"").unwrap();
-        let mut s = Store { file_changes: vec![], root: lib.0.clone(), index: HashMap::new(), trash: serde_json::from_slice(&index).unwrap(), warnings: vec![], loaded: Default::default(), copied: Default::default(), parsed: HashMap::new() };
+        let mut s = Store { file_changes: vec![], root: lib.0.clone(), index: HashMap::new(), trash: serde_json::from_slice(&index).unwrap(), warnings: vec![], loaded: Default::default(), copied: Default::default(), parsed: HashMap::new(), version_policy: Default::default() };
         assert_eq!(s.list_trash().len(), 1);
         assert_eq!(s.trash.len(), 1);
     }
@@ -1499,5 +1509,50 @@ mod tests {
         std::fs::create_dir(lib.0.join("docs").join(format!("{id}.xml.tmp"))).unwrap();
         s.save(&id, &doc("新")).unwrap();
         assert_eq!(s.load(&id).unwrap().title.text, "新");
+    }
+
+    #[test]
+    fn versions_persist_across_reopen_and_restore() {
+        let lib = Lib::new("versions");
+        let mut s = lib.open();
+        let id = s.create_from(&doc("v1")).unwrap();
+        // No throttling, so each distinct save becomes a version.
+        s.set_version_policy(VersionPolicy { enabled: true, max: 10, min_interval_ms: 0 });
+        s.save(&id, &doc("v2")).unwrap();
+        s.save(&id, &doc("v3")).unwrap();
+        let versions = s.list_versions(&id);
+        assert_eq!(versions.len(), 3, "creation, v2 and v3 are each snapshotted");
+        assert_eq!(versions.first().unwrap().title, "v3", "newest first");
+        let target = versions.iter().find(|v| v.title == "v2").unwrap().id.clone();
+        assert!(s.version_preview(&id, &target).contains("v2"));
+        drop(s);
+
+        // A fresh Store reads the same history, restores, and can save again
+        // without the conflict check seeing a stale baseline.
+        let mut s = lib.open();
+        assert_eq!(s.list_versions(&id).len(), versions.len());
+        s.restore_version(&id, &target).unwrap();
+        assert_eq!(s.load(&id).unwrap().title.text, "v2");
+        s.set_version_policy(VersionPolicy { enabled: true, max: 10, min_interval_ms: 0 });
+        s.save(&id, &doc("v4")).unwrap();
+        assert_eq!(s.load(&id).unwrap().title.text, "v4");
+    }
+
+    #[test]
+    fn version_history_respects_policy_and_deduplicates() {
+        let lib = Lib::new("version-policy");
+        let mut s = lib.open();
+        s.set_version_policy(VersionPolicy { enabled: false, max: 10, min_interval_ms: 0 });
+        let id = s.create_from(&doc("first")).unwrap();
+        assert!(s.list_versions(&id).is_empty(), "disabled history writes nothing");
+
+        s.set_version_policy(VersionPolicy { enabled: true, max: 2, min_interval_ms: 0 });
+        s.save(&id, &doc("second")).unwrap();
+        s.save(&id, &doc("second")).unwrap(); // same bytes: skipped
+        s.save(&id, &doc("third")).unwrap();
+        let versions = s.list_versions(&id);
+        assert_eq!(versions.len(), 2, "max caps the retained versions");
+        assert_eq!(versions.first().unwrap().title, "third");
+        assert!(s.read_version(&id, "not-a-version").is_err());
     }
 }

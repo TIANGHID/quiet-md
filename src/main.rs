@@ -25,6 +25,7 @@ mod docinfo;
 mod docmenu;
 mod editor;
 mod highlight;
+mod history;
 mod home;
 mod html;
 mod input;
@@ -145,7 +146,10 @@ fn main() {
         changelog::startup(existed);
         shortcuts::init(cx);
         match shared_store::SharedStore::open() {
-            Ok(s) => cx.set_global(s),
+            Ok(s) => {
+                s.set_version_policy(settings::version_policy());
+                cx.set_global(s);
+            }
             Err(err) => logging::fatal("无法打开文档库 / Could not open the library", &err),
         }
         let quick_enabled = !scripted;

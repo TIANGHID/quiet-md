@@ -258,6 +258,8 @@ pub struct Workspace {
     /// Last-frame bounds of the open submenu (clicks there keep the menu open).
     pub doc_sub_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub doc_info: Option<DocInfo>,
+    /// The open 历史版本 dialog.
+    pub history: Option<crate::history::HistoryPanel>,
     pub list_scroll: ScrollHandle,
     pub search_scroll: ScrollHandle,
     /// Last-frame bounds of the row menu's 下载 submenu.
@@ -434,6 +436,7 @@ impl Workspace {
             doc_sub: None,
             doc_sub_bounds: Rc::new(Cell::new(None)),
             doc_info: None,
+            history: None,
             list_scroll: ScrollHandle::new(),
             search_scroll: ScrollHandle::new(),
             row_sub_bounds: Rc::new(Cell::new(None)),
@@ -1312,6 +1315,7 @@ impl Render for Workspace {
         let search = self.render_search(window, cx);
         let doc_menu = self.render_doc_menu(window, cx);
         let doc_info = self.render_doc_info(cx);
+        let history = self.render_history(cx);
         let confirm = self.render_confirm(cx);
         let trash_menu = self.render_trash_menu(cx);
         let home_menus = self.render_home_menus(cx);
@@ -1426,8 +1430,9 @@ impl Render for Workspace {
                     cx.stop_propagation();
                     return;
                 }
-                if ev.keystroke.key == "escape" && (w.doc_info.is_some() || w.doc_menu || w.mode_menu) {
+                if ev.keystroke.key == "escape" && (w.doc_info.is_some() || w.history.is_some() || w.doc_menu || w.mode_menu) {
                     w.doc_info = None;
+                    w.history = None;
                     w.mode_menu = false;
                     w.doc_menu = false;
                     w.doc_sub = None;
@@ -1477,6 +1482,7 @@ impl Render for Workspace {
             .children(doc_menu)
             .children(mode_menu)
             .children(doc_info)
+            .children(history)
             .children(trash_menu)
             .children(home_menus)
             .children(theme_menu)

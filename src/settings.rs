@@ -29,6 +29,12 @@ pub fn motion_high() -> bool { MOTION_HIGH.load(Ordering::Relaxed) }
 /// Draw a rule under every visual text row (ruled-paper look).
 pub fn ruled_lines() -> bool { RULED.load(Ordering::Relaxed) }
 pub fn tr(zh: &'static str, en: &'static str) -> &'static str { if english() { en } else { zh } }
+/// The version policy the UI hands to the store: `fdl_core` cannot depend on
+/// this module, so preferences are pushed in rather than read from there.
+pub fn version_policy() -> crate::store::VersionPolicy {
+    let p = prefs();
+    crate::store::VersionPolicy { enabled: p.history_enabled, max: p.history_limit as usize, min_interval_ms: 60_000 }
+}
 /// Whether ⌘N should make a Markdown file: the preferred 快捷新建 type, or the
 /// last one created from the 新建 menu when no fixed type is set.
 pub fn quick_new_markdown() -> bool {
@@ -58,6 +64,10 @@ pub struct Preferences {
     pub motion: String,
     /// 稿纸横线: a rule under each visual text row, spaced by that block's line height.
     pub ruled_lines: bool,
+    /// 历史版本: keep persistent snapshots of each document as it is saved.
+    pub history_enabled: bool,
+    /// How many versions of each document to keep.
+    pub history_limit: u32,
     /// 快捷新建 (⌘N) 的默认类型: "doc", "markdown", or empty to repeat the last one.
     pub new_default: String,
     /// The type last created from the 新建 menu: "doc" or "markdown" (empty before any).
@@ -76,7 +86,7 @@ fn system_english() -> bool {
 }
 
 impl Default for Preferences {
-    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), ruled_lines: false, new_default: String::new(), last_new: String::new() } }
+    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), ruled_lines: false, history_enabled: true, history_limit: 50, new_default: String::new(), last_new: String::new() } }
 }
 
 impl Preferences {
@@ -499,6 +509,9 @@ impl Workspace {
             if p.quick_hotkey { crate::quick_note::register(cx); } else { crate::quick_note::suspend_hotkey(); }
         }
         if p.appearance != old.appearance { apply_appearance(&p.appearance); }
+        if p.history_enabled != old.history_enabled || p.history_limit != old.history_limit {
+            self.store.set_version_policy(version_policy());
+        }
         // A rule changes only the paint, not the layout; all open windows
         // still need a repaint (their text cache is cleared by refresh_all).
         if p.theme_id() != old.theme_id() || p.english != old.english || sync_dark(cx) || p.ruled_lines != old.ruled_lines {
@@ -642,6 +655,11 @@ impl Workspace {
                     switch("pref-remote", p.remote_images).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.remote_images = !p.remote_images, cx)))).into_any_element(),
                 row(tr("自动检查更新", "Check for updates automatically"), desc(tr("只读取一份版本信息，不发送任何数据；新版本由你决定何时下载安装。", "Reads a version file and sends nothing about you; you decide when to download and install.")),
                     switch("pref-update", p.auto_update).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.auto_update = !p.auto_update, cx)))).into_any_element(),
+                row(tr("历史版本", "Version history"), desc(tr("保存文档时自动留下快照，可在文档「…」菜单中查看并恢复；默认每篇最多 50 个版本，两次快照至少间隔 1 分钟。", "Keeps a snapshot as documents are saved. Open … › Version history to preview and restore; up to 50 versions per document, at most one a minute.")),
+                    switch("pref-history", p.history_enabled).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.history_enabled = !p.history_enabled, cx)))).into_any_element(),
+                row(tr("保留版本数", "Versions to keep"), None,
+                    segmented("history-limit", &["20", "50", "100"], match p.history_limit { 20 => 0, 100 => 2, _ => 1 },
+                        |w, i, cx| w.set_pref(|p| p.history_limit = [20, 50, 100][i], cx), cx)).into_any_element(),
                 row(tr("快捷新建默认类型", "Quick new (⌘N)"), desc(tr("⌘N 新建时创建的类型；「记住上次」沿用你上次从新建菜单选的类型。", "What ⌘N creates; “Last used” repeats the type you last picked from the New menu.")), {
                     let sel = match p.new_default.as_str() { "doc" => 1, "markdown" => 2, _ => 0 };
                     segmented("quick-new", &[tr("记住上次", "Last used"), tr("文档", "Document"), "Markdown"], sel,
@@ -1390,5 +1408,17 @@ mod preference_tests {
         assert!(saved.ruled_lines);
         let round_trip: Preferences = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
         assert!(round_trip.ruled_lines);
+    }
+
+    #[test]
+    fn version_history_defaults_survive_old_preferences() {
+        assert!(Preferences::default().history_enabled);
+        assert_eq!(Preferences::default().history_limit, 50);
+        let old: Preferences = serde_json::from_str(r#"{"ruled_lines":true}"#).unwrap();
+        assert!(old.history_enabled);
+        assert_eq!(old.history_limit, 50);
+        let saved: Preferences = serde_json::from_str(r#"{"history_enabled":false,"history_limit":20}"#).unwrap();
+        assert!(!saved.history_enabled);
+        assert_eq!(saved.history_limit, 20);
     }
 }
