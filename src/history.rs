@@ -143,13 +143,13 @@ impl Workspace {
                         div().flex_none().w(px(260.)).h_full().p(px(12.)).border_r_1().border_color(Theme::line_divider()).flex().flex_col()
                             .child(div().px(px(4.)).pb(px(8.)).text_size(px(11.)).text_color(Theme::text_caption()).child(tr("已保存的版本（最新在前）", "Saved versions (newest first)")))
                             .child(
-                                div().flex_1().min_h_0().overflow_y_scroll().flex().flex_col()
+                                div().id("history-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col()
                                     .children(rows)
                                     .when(empty, |d| d.child(div().px(px(4.)).pt(px(12.)).text_size(px(12.)).text_color(Theme::text_placeholder()).child(tr("暂无历史版本，保存文档后会自动生成。", "No versions yet; saving the document creates one.")))),
                             ),
                     )
                     .child(
-                        div().flex_1().min_w_0().p(px(20.)).overflow_y_scroll().flex().flex_col().gap(px(2.)).children(preview_lines),
+                        div().id("history-preview").flex_1().min_w_0().p(px(20.)).overflow_y_scroll().flex().flex_col().gap(px(2.)).children(preview_lines),
                     ),
             )
             .child(
