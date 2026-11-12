@@ -84,7 +84,7 @@ impl Store {
     /// Keep `bytes` as a version. `force` skips throttling and de-duplication
     /// (used before a restore, so the replaced state is never lost), but an
     /// explicitly disabled history still records nothing.
-    fn record_version(&mut self, id: &str, bytes: &str, title: &str, force: bool) -> Result<()> {
+    pub(super) fn record_version(&mut self, id: &str, bytes: &str, title: &str, force: bool) -> Result<()> {
         let policy = self.version_policy;
         if !policy.enabled { return Ok(()) }
         let dir = self.history_dir(id);
