@@ -153,6 +153,16 @@ impl TextLayout {
     }
 }
 
+/// Ruled-paper lines: the window-space y of the rule under every visual row.
+/// `rows` holds one entry per wrapped line and `line_height` is the block's
+/// own (body, heading, table cell, ...), so rule spacing follows the type
+/// scale rather than a fixed grid. An inline equation can stretch `row.h`;
+/// using the text line box (`row.y + row.base_dy + line_height`) keeps the
+/// rule attached to the glyphs instead of the stretched row box.
+fn ruled_line_tops(rows: &[Row], line_height: Pixels, origin_y: Pixels, thickness: Pixels) -> Vec<Pixels> {
+    rows.iter().map(|r| origin_y + r.y + r.base_dy + line_height - thickness).collect()
+}
+
 fn prev_char(s: &str, i: usize) -> usize {
     s[..i].char_indices().next_back().map(|(k, _)| k).unwrap_or(0)
 }
@@ -1001,6 +1011,21 @@ impl Element for RichTextElement {
             Align::Center => TextAlign::Center,
             Align::Right => TextAlign::Right,
         };
+        // Ruled-paper lines, below everything else in this block: one rule
+        // per visual (wrapped) row, at the bottom of that row's text box.
+        // Code blocks keep their own gutter and background instead.
+        if crate::settings::ruled_lines() && !layout.mono {
+            let thickness = px(1.);
+            // `ca` adapts to the dark look, so the rule stays a quiet line.
+            let color = theme::ca(craft::N1000, 0.10);
+            let tops = ruled_line_tops(&layout.rows, lh, bounds.top(), thickness);
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                for y in tops {
+                    let rule = Bounds::new(point(bounds.left(), y), size(bounds.size.width, thickness));
+                    window.paint_quad(fill(rule, color));
+                }
+            });
+        }
         // Inline code chips behind the text: a grey chip with a 1pt rim,
         // radius 3, 4.5pt beyond the glyphs.
         if !self.text.is_empty() && !self.spec.mono {
@@ -1481,5 +1506,37 @@ mod tests {
         assert_eq!(hscroll(px(300.), px(150.), w, px(0.)), px(58.));
         // Shorter text clamps the old offset.
         assert_eq!(hscroll(px(120.), px(120.), w, px(208.)), px(28.));
+    }
+}
+
+#[cfg(test)]
+mod ruled_tests {
+    use super::{Row, ruled_line_tops};
+    use gpui::px;
+
+    fn row(y: f32, h: f32, base_dy: f32) -> Row {
+        Row { range: 0..0, hard: 0, y: px(y), h: px(h), base_dy: px(base_dy), x0: px(0.), align_dx: px(0.) }
+    }
+
+    #[test]
+    fn spacing_follows_each_blocks_line_height() {
+        // Body text at 22pt: rules 22pt apart. A heading at 40pt: 40pt apart.
+        let body = [row(0., 22., 0.), row(22., 22., 0.)];
+        assert_eq!(ruled_line_tops(&body, px(22.), px(100.), px(1.)), vec![px(121.), px(143.)]);
+        let heading = [row(0., 40., 0.), row(40., 40., 0.)];
+        assert_eq!(ruled_line_tops(&heading, px(40.), px(100.), px(1.)), vec![px(139.), px(179.)]);
+    }
+
+    #[test]
+    fn every_wrapped_row_gets_a_rule_and_tall_inline_content_keeps_the_grid() {
+        // One hard line wrapped into three visual rows; an inline equation
+        // stretched the first to 34pt and pushed its text box down 6pt.
+        let rows = [row(0., 34., 6.), row(34., 22., 0.), row(56., 22., 0.)];
+        let tops = ruled_line_tops(&rows, px(22.), px(0.), px(1.));
+        assert_eq!(tops.len(), rows.len());
+        assert_eq!(tops, vec![px(27.), px(55.), px(77.)]);
+        // An empty block still has its placeholder row, so a fresh sheet
+        // shows one rule to write on.
+        assert_eq!(ruled_line_tops(&[row(0., 22., 0.)], px(22.), px(0.), px(1.)), vec![px(21.)]);
     }
 }

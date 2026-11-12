@@ -16,6 +16,8 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 static FEISHU: AtomicBool = AtomicBool::new(false);
 static ENGLISH: AtomicBool = AtomicBool::new(true);
 static MOTION_HIGH: AtomicBool = AtomicBool::new(false);
+/// 稿纸横线: read once per painted text block, so keep it out of `prefs()`.
+static RULED: AtomicBool = AtomicBool::new(false);
 static PREFS: RwLock<Option<Preferences>> = RwLock::new(None);
 
 /// The active document theme draws blocks the 飞书 way (else Craft's).
@@ -24,6 +26,8 @@ pub(crate) fn set_base(feishu: bool) { FEISHU.store(feishu, Ordering::Relaxed); 
 pub fn english() -> bool { ENGLISH.load(Ordering::Relaxed) }
 /// 外观 › 动画 is 丰富: folding, the selection and hover animate too (else they answer at once).
 pub fn motion_high() -> bool { MOTION_HIGH.load(Ordering::Relaxed) }
+/// Draw a rule under every visual text row (ruled-paper look).
+pub fn ruled_lines() -> bool { RULED.load(Ordering::Relaxed) }
 pub fn tr(zh: &'static str, en: &'static str) -> &'static str { if english() { en } else { zh } }
 /// Whether ⌘N should make a Markdown file: the preferred 快捷新建 type, or the
 /// last one created from the 新建 menu when no fixed type is set.
@@ -52,6 +56,8 @@ pub struct Preferences {
     pub seen_version: String,
     /// 动画: "high" animates folding, the selection and hover; empty keeps them instant.
     pub motion: String,
+    /// 稿纸横线: a rule under each visual text row, spaced by that block's line height.
+    pub ruled_lines: bool,
     /// 快捷新建 (⌘N) 的默认类型: "doc", "markdown", or empty to repeat the last one.
     pub new_default: String,
     /// The type last created from the 新建 menu: "doc" or "markdown" (empty before any).
@@ -70,7 +76,7 @@ fn system_english() -> bool {
 }
 
 impl Default for Preferences {
-    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), new_default: String::new(), last_new: String::new() } }
+    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), ruled_lines: false, new_default: String::new(), last_new: String::new() } }
 }
 
 impl Preferences {
@@ -90,6 +96,7 @@ fn apply(p: Preferences) {
     FEISHU.store(p.feishu, Ordering::Relaxed);
     ENGLISH.store(p.english, Ordering::Relaxed);
     MOTION_HIGH.store(p.motion == "high", Ordering::Relaxed);
+    RULED.store(p.ruled_lines, Ordering::Relaxed);
     // Before the themes are read (startup) the base comes from `feishu`.
     themes::select(&p.theme_id());
     *PREFS.write().unwrap() = Some(p);
@@ -492,7 +499,9 @@ impl Workspace {
             if p.quick_hotkey { crate::quick_note::register(cx); } else { crate::quick_note::suspend_hotkey(); }
         }
         if p.appearance != old.appearance { apply_appearance(&p.appearance); }
-        if p.theme_id() != old.theme_id() || p.english != old.english || sync_dark(cx) {
+        // A rule changes only the paint, not the layout; all open windows
+        // still need a repaint (their text cache is cleared by refresh_all).
+        if p.theme_id() != old.theme_id() || p.english != old.english || sync_dark(cx) || p.ruled_lines != old.ruled_lines {
             refresh_all(self, cx);
         }
         cx.notify();
@@ -685,6 +694,8 @@ impl Workspace {
                     row(tr("动画", "Animation"), Some(tr("克制：切换即时，只有拖拽带动画。丰富：展开收起、选中和悬停也带动画。", "Low: switching is instant, only dragging animates. High: folding, selection and hover animate too.").into()),
                         segmented("motion", &[tr("克制", "Low"), tr("丰富", "High")], usize::from(prefs().motion == "high"),
                             |w, i, cx| w.set_pref(|p| p.motion = ["", "high"][i].into(), cx), cx)).into_any_element(),
+                    row(tr("稿纸横线", "Ruled lines"), desc(tr("每个文字行下方画一条横线，间距随该块的行高自动变化；代码块与导出、打印保持原样。", "A rule beneath each text row, spaced by that block's own line height. Code blocks, exports and printing stay as they are.")),
+                        switch("pref-ruled", prefs().ruled_lines).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.ruled_lines = !p.ruled_lines, cx)))).into_any_element(),
                     row(tr("文档主题", "Document theme"), None, picker).into_any_element(),
                     sample.into_any_element(),
                     row(tr("主题 CSS", "Theme CSS"), Some(where_),
@@ -1368,5 +1379,16 @@ mod preference_tests {
             let round_trip: Preferences = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
             assert_eq!(round_trip.theme_id(), expected);
         }
+    }
+
+    #[test]
+    fn ruled_lines_defaults_off_and_old_preferences_stay_valid() {
+        assert!(!Preferences::default().ruled_lines);
+        // A preferences.json written before the switch has no field for it.
+        assert!(!serde_json::from_str::<Preferences>(r#"{"feishu":false}"#).unwrap().ruled_lines);
+        let saved: Preferences = serde_json::from_str(r#"{"ruled_lines":true}"#).unwrap();
+        assert!(saved.ruled_lines);
+        let round_trip: Preferences = serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert!(round_trip.ruled_lines);
     }
 }
